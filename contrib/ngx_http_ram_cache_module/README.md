@@ -144,7 +144,9 @@ contrib/ngx_http_ram_cache_module/test.sh \
 
 It exercises real NGINX workers, HTTP/HTTPS, Host, and query key separation,
 HEAD from cached GET metadata, and verifies GET/HEAD L1 hits do not add origin
-requests. It covers file-backed responses, multi-block objects, native slice
+requests. A URI/query boundary case verifies distinct field identities even
+when naive field concatenation would produce the same bytes. It covers
+file-backed responses, multi-block objects, native slice
 assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
@@ -173,7 +175,7 @@ integration suite across the worker/client matrix on this validation branch.
 
 This module is a functional, tested implementation in the NGINX fork, but it
 has not met the supplied production-readiness acceptance criteria. The initial
-benchmark is narrow and noisy; sanitizer, fault-injection, cancellation, L2
-corruption, restart, the full worker/client matrix, and all RFC and slice edge
-cases remain open. It does not integrate with an external admin UI or
-deployment system. Review `STATUS.md` before treating it as production-ready.
+benchmark is narrow and noisy and does not establish a performance gain. Open
+verification and implementation work is listed in `STATUS.md`. The module
+does not integrate with an external admin UI or deployment system. Do not
+treat it as production-ready.

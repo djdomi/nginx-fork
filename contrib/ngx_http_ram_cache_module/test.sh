@@ -77,6 +77,10 @@ http {
             default_type text/plain;
             return 200 "\$arg_id";
         }
+        location ^~ /identity {
+            default_type text/plain;
+            return 200 "\$uri|\$args";
+        }
         location = /host-key {
             default_type text/plain;
             return 200 "\$host";
@@ -211,6 +215,42 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/query-beta-first.h"; then
     echo "different query parameter incorrectly reused an L1 object" >&2
     exit 1
 fi
+
+# URI and query are separate key fields. These requests have the same plain
+# concatenation ("/identityx") but must remain distinct cache objects.
+for identity in query path; do
+    if [ "$identity" = query ]; then
+        identity_url="http://127.0.0.1:$port_proxy/identity?x"
+        identity_expected='/identity|x'
+    else
+        identity_url="http://127.0.0.1:$port_proxy/identityx"
+        identity_expected='/identityx|'
+    fi
+    curl --noproxy '*' --fail --silent \
+        -D "$test_root/key-boundary-$identity-first.h" \
+        "$identity_url" -o "$test_root/key-boundary-$identity-first.body"
+    printf '%s' "$identity_expected" \
+        > "$test_root/key-boundary-$identity-expected.body"
+    cmp "$test_root/key-boundary-$identity-expected.body" \
+        "$test_root/key-boundary-$identity-first.body"
+done
+if rg -qi '^X-RAM-Cache: HIT' "$test_root/key-boundary-path-first.h"; then
+    echo "different URI/query field boundaries incorrectly shared an L1 object" >&2
+    exit 1
+fi
+for identity in query path; do
+    if [ "$identity" = query ]; then
+        identity_url="http://127.0.0.1:$port_proxy/identity?x"
+    else
+        identity_url="http://127.0.0.1:$port_proxy/identityx"
+    fi
+    curl --noproxy '*' --fail --silent \
+        -D "$test_root/key-boundary-$identity-hit.h" \
+        "$identity_url" -o "$test_root/key-boundary-$identity-hit.body"
+    cmp "$test_root/key-boundary-$identity-expected.body" \
+        "$test_root/key-boundary-$identity-hit.body"
+    rg -qi '^X-RAM-Cache: HIT' "$test_root/key-boundary-$identity-hit.h"
+done
 
 # Host is part of object identity when the L2 key and origin representation
 # are host-sensitive.
