@@ -112,11 +112,17 @@ L2 promotion, PURGE authorization and invalidation, expiry, reload, concurrent
 hits, bypasses, and metrics. Tests that have not been implemented are listed
 in `STATUS.md`.
 
+Set `RAM_CACHE_WORKERS` and `RAM_CACHE_PARALLEL_CLIENTS` to change the live
+test's worker and parallel-hit counts. `benchmark.sh` compares warm L2 with no
+module, warm L2 with the module disabled, and warm L1 with the module enabled.
+The initial results and their limits are recorded in `BENCHMARK.md`; they do
+not establish a performance gain.
+
 ## Scope and readiness
 
 This module is a functional, tested implementation in the NGINX fork, but it
-has not met the supplied production-readiness acceptance criteria. It has not
-been benchmarked or tested with sanitizers, 100-client stress, fault injection,
-L2 corruption, restart, cancellation, or all RFC and slice edge cases. It also
-does not integrate with an external admin UI or deployment system. Review
-`STATUS.md` before treating it as production-ready.
+has not met the supplied production-readiness acceptance criteria. The initial
+benchmark is narrow and noisy; sanitizer, fault-injection, cancellation, L2
+corruption, restart, the full worker/client matrix, and all RFC and slice edge
+cases remain open. It does not integrate with an external admin UI or
+deployment system. Review `STATUS.md` before treating it as production-ready.

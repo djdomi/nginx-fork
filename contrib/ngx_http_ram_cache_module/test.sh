@@ -8,6 +8,15 @@ fi
 
 nginx_bin=$1
 module_so=$2
+worker_processes=${RAM_CACHE_WORKERS:-2}
+parallel_clients=${RAM_CACHE_PARALLEL_CLIENTS:-100}
+case "$worker_processes:$parallel_clients" in
+    *[!0-9:]*|:*|*:) echo "worker/client counts must be positive integers" >&2; exit 2 ;;
+esac
+if [ "$worker_processes" -lt 1 ] || [ "$parallel_clients" -lt 1 ]; then
+    echo "worker/client counts must be positive integers" >&2
+    exit 2
+fi
 test_root=$(mktemp -d)
 mkdir -p "$test_root/logs"
 mkdir -p "$test_root/disk"
@@ -31,7 +40,7 @@ trap cleanup EXIT HUP INT TERM
 
 cat > "$test_root/nginx.conf" <<EOF
 load_module $module_so;
-worker_processes 2;
+worker_processes $worker_processes;
 pid nginx.pid;
 error_log stderr notice;
 events { worker_connections 256; }
@@ -337,20 +346,22 @@ curl --noproxy '*' --fail --silent -D "$test_root/reload.h" \
 rg -qi '^X-RAM-Cache: HIT' "$test_root/reload.h"
 
 i=0
-while [ "$i" -lt 100 ]; do
+while [ "$i" -lt "$parallel_clients" ]; do
     i=$((i + 1))
     curl --noproxy '*' --fail --silent -D "$test_root/parallel-$i.h" \
         "http://127.0.0.1:$port_proxy/object" -o /dev/null &
 done
 wait
 i=0
-while [ "$i" -lt 100 ]; do
+while [ "$i" -lt "$parallel_clients" ]; do
     i=$((i + 1))
     rg -qi '^X-RAM-Cache: HIT' "$test_root/parallel-$i.h"
 done
-worker_count=$(rg -io '^X-Worker: [0-9]+' "$test_root"/parallel-*.h \
+seen_workers=$(rg -io '^X-Worker: [0-9]+' "$test_root"/parallel-*.h \
     | sort -u | wc -l)
-if [ "$worker_count" -lt 2 ]; then
+minimum_seen_workers=1
+if [ "$worker_processes" -gt 1 ]; then minimum_seen_workers=2; fi
+if [ "$seen_workers" -lt "$minimum_seen_workers" ]; then
     echo "shared L1 object was not observed from multiple worker processes" >&2
     exit 1
 fi

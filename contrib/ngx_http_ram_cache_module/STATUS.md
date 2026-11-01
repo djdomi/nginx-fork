@@ -66,7 +66,8 @@ The test executes the real NGINX binary with two workers and verifies:
 - `nginx -t`, module load, ordinary MISS and subsequent L1 HIT.
 - A 150,000-byte file-backed response across multiple 64 KiB body blocks and
   byte-for-byte response comparison.
-- Shared hits observed from at least two worker PIDs and 100 simultaneous hits.
+- Shared hits observed from at least two worker PIDs. The live integration
+  suite passed for these worker/client pairs: 1/1, 2/10, 4/50, and 8/100.
 - Distinct HTTP and HTTPS cache keys.
 - Native 4-byte slice caching: eight initial segment requests, no additional
   origin requests on replay, correct body and validators, plus non-aligned,
@@ -87,6 +88,15 @@ The test executes the real NGINX binary with two workers and verifies:
 The localhost test requires permission to bind loopback ports in restricted
 execution environments. It was run with that permission and passed.
 
+An initial benchmark was also run with three fresh trials per mode, each using
+60 warm requests at concurrency 10 against the same 1 MiB payload. It validates
+the HIT status before measurement and confirms one origin request per trial.
+The measured median throughput was 1,228.099 MiB/s without the module,
+1,425.043 MiB/s with the module off, and 1,078.361 MiB/s with L1 on. The
+run-to-run spread was wide; these data do not demonstrate a performance gain.
+Raw values and the method are in `benchmark-results-2026-11-01.csv` and
+`BENCHMARK.md`.
+
 ## Not yet verified / not implemented
 
 This implementation is not production-ready. The supplied completion criteria
@@ -94,9 +104,10 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- No sanitizer, race detector, long-running, or 1/10/50/100-client scenario
-  matrix. The 100-client shared-hit case above is the only 100-client test.
-  Cancellation,
+- No full 4-by-4 worker/client cross-product, sanitizer, race detector, or
+  long-running test. The tested pairs are 1/1, 2/10, 4/50, and 8/100. Parallel
+  requests all hit the same warmed object; different-object load is not yet
+  covered. Cancellation,
   upstream abort, worker death during fill, concurrent eviction under load,
   memory exhaustion, and failure injection are untested.
 - No exhaustive Range/slice matrix: suffix and multiple ranges, 416, changed
@@ -116,9 +127,10 @@ that remain open include:
 - No L2 purge integration, admin UI, health checks, production image, setup,
   or update integration exists here. PURGE is an L1-only primitive; access
   control beyond its secret token must be supplied by the NGINX deployment.
-- No benchmark was run. There are no throughput, latency, CPU, RAM, disk-I/O,
-  event-loop, or comparative Page Cache/L2 measurements, so no performance
-  gain is claimed.
+- The benchmark does not cover cold cache, mixed load, large transfer scaling,
+  random ranges, eviction, CPU, RAM, disk I/O, context switches, or event-loop
+  impact. It uses a small loopback client and has substantial run-to-run noise;
+  use it only as a reproducible initial measurement, not a capacity result.
 - No full installation test, platform/ABI matrix, or NGINX upstream test-suite
   run was performed.
 
