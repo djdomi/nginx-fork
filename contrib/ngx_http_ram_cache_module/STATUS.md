@@ -119,6 +119,11 @@ ASan otherwise aborts before serving requests. Address, bounds, and
 use-after-free checks remained enabled. This run does not verify leaks or data
 races.
 
+GitHub Actions run `41288427080` passed on commit `e2c018d9c`. It built the
+module and passed the live integration suite for the full 4-by-4 matrix of 1,
+2, 4, and 8 workers with 1, 10, 50, and 100 parallel clients. Its separate
+AddressSanitizer job also passed the suite with 2 workers and 100 clients.
+
 An initial benchmark was also run with three fresh trials per mode, each using
 60 warm requests at concurrency 10 against the same 1 MiB payload. It validates
 the HIT status before measurement and confirms one origin request per trial.
@@ -135,11 +140,8 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- The full 4-by-4 worker/client cross-product passed on GitHub after the
-  allocator-headroom change. A fresh remote run is required for the subsequent
-  stricter-reload and concurrent-PURGE tests. ThreadSanitizer, LeakSanitizer,
-  and a long-running test
-  remain open. Parallel requests all hit the same warmed object. Multi-key
+- ThreadSanitizer, LeakSanitizer, and a long-running test remain open. Parallel
+  requests all hit the same warmed object. Multi-key
   pressure is sequential, not concurrent. Upstream abort, worker death during fill,
   concurrent eviction under load, full memory exhaustion, and forced allocator
   failure are untested.
