@@ -84,15 +84,16 @@ uses reader/writer locks and deferred freeing for entries still in use. Its
 store copies data between worker-local storage and shared pages; this module
 instead serves pinned shared-memory blocks through NGINX output chains.
 
-The Squid v7 `cache_mem` documentation describes an ideal budget for hot,
-negative-cached, and in-transit objects, and explicitly says in-transit demand
-may exceed that budget. With shared-memory caching enabled, those in-transit
-objects remain local to workers. The v7
-`maximum_object_size_in_memory` directive rejects objects above its configured
-limit. Both directives are marked unavailable in Squid v8, so their v7 defaults
-and semantics are not treated as current universal Squid behavior. This module
-uses an explicit hard shared-zone limit, a bounded capture reservation, a
-per-object maximum, and complete-object publication before L1 lookup.
+The [Squid v7 `cache_mem` documentation](https://www.squid-cache.org/Versions/v7/cfgman/cache_mem.html)
+describes an ideal budget for hot, negative-cached, and in-transit objects, and
+explicitly says in-transit demand may exceed that budget. With shared-memory
+caching enabled, those in-transit objects remain local to workers. The v7
+[`maximum_object_size_in_memory` directive](https://www.squid-cache.org/Versions/v7/cfgman/maximum_object_size_in_memory.html)
+rejects objects above its configured limit. Both directives are marked
+unavailable in Squid v8, so their v7 defaults and semantics are not treated as
+current universal Squid behavior. This module uses an explicit hard shared-zone
+limit, a bounded capture reservation, a per-object maximum, and complete-object
+publication before L1 lookup.
 
 Squid's heap replacement code includes LFUDA and GDSF scoring based on
 frequency, object size, recency, and dynamic aging. The NGINX module follows the
