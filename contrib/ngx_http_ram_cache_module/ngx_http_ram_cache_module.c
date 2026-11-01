@@ -3,6 +3,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <ngx_http_cache.h>
+#include <ngx_crc32.h>
 
 #define RAM_HEADER(h, s) \
     ((h).key.len == sizeof(s) - 1 \
@@ -42,6 +43,7 @@ struct ngx_http_ram_cache_pin_s {
 struct ngx_http_ram_cache_entry_s {
     ngx_queue_t       queue;
     ngx_queue_t       pins;
+    ngx_rbtree_node_t node;
     ngx_uint_t        refs;
     ngx_uint_t        state;
     ngx_uint_t        protected;
@@ -63,6 +65,8 @@ struct ngx_http_ram_cache_entry_s {
 };
 
 typedef struct {
+    ngx_rbtree_t      index;
+    ngx_rbtree_node_t sentinel;
     ngx_queue_t       probation;
     ngx_queue_t       protected;
     ngx_queue_t       captures;
@@ -143,6 +147,10 @@ static ngx_int_t ram_cache_header_filter(ngx_http_request_t *r);
 static ngx_int_t ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
 static ngx_int_t ram_cache_make_key(ngx_http_request_t *r, ngx_str_t *key);
 static u_char *ram_cache_key_field(u_char *p, const u_char *data, size_t len);
+static void ram_cache_rbtree_insert(ngx_rbtree_node_t *root,
+    ngx_rbtree_node_t *node, ngx_rbtree_node_t *sentinel);
+static ngx_int_t ram_cache_compare_keys(const u_char *a, size_t a_len,
+    const u_char *b, size_t b_len);
 static ngx_int_t ram_cache_is_slice_subrequest(ngx_http_request_t *r);
 static ngx_http_variable_value_t *ram_cache_slice_range(ngx_http_request_t *r);
 static void ram_cache_unpin(void *data);
@@ -347,6 +355,7 @@ ram_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
     }
     sh = ngx_slab_alloc(shpool, sizeof(*sh));
     if (sh == NULL) return NGX_ERROR;
+    ngx_rbtree_init(&sh->index, &sh->sentinel, ram_cache_rbtree_insert);
     ngx_queue_init(&sh->probation);
     ngx_queue_init(&sh->protected);
     ngx_queue_init(&sh->captures);
@@ -502,25 +511,80 @@ ram_cache_slice_range(ngx_http_request_t *r)
 static ngx_http_ram_cache_entry_t *
 ram_cache_find(ngx_str_t *key)
 {
-    ngx_queue_t *q;
+    ngx_rbtree_node_t *node, *sentinel;
     ngx_http_ram_cache_entry_t *entry;
-    ngx_queue_t *queues[2];
-    ngx_uint_t i;
+    ngx_int_t rc;
+    ngx_rbtree_key_t hash;
 
-    queues[0] = &ram_cache_conf->sh->probation;
-    queues[1] = &ram_cache_conf->sh->protected;
-    for (i = 0; i < 2; i++) {
-        for (q = ngx_queue_head(queues[i]);
-             q != ngx_queue_sentinel(queues[i]); q = ngx_queue_next(q))
-        {
-            entry = ngx_queue_data(q, ngx_http_ram_cache_entry_t, queue);
-            if (entry->state == RAM_ENTRY_READY
-                && entry->key_len == key->len
-                && ngx_memcmp(entry->data, key->data, key->len) == 0)
-                return entry;
+    hash = ngx_crc32_long(key->data, key->len);
+    sentinel = ram_cache_conf->sh->index.sentinel;
+    node = ram_cache_conf->sh->index.root;
+    while (node != sentinel) {
+        if (hash < node->key) {
+            node = node->left;
+            continue;
         }
+        if (hash > node->key) {
+            node = node->right;
+            continue;
+        }
+
+        entry = ngx_rbtree_data(node, ngx_http_ram_cache_entry_t, node);
+        rc = ram_cache_compare_keys(key->data, key->len, entry->data,
+                                    entry->key_len);
+        if (rc == 0) return entry;
+        node = rc < 0 ? node->left : node->right;
     }
     return NULL;
+}
+
+
+static ngx_int_t
+ram_cache_compare_keys(const u_char *a, size_t a_len, const u_char *b,
+    size_t b_len)
+{
+    size_t n = ngx_min(a_len, b_len);
+    ngx_int_t rc = ngx_memcmp(a, b, n);
+
+    if (rc != 0) return rc;
+    if (a_len < b_len) return -1;
+    if (a_len > b_len) return 1;
+    return 0;
+}
+
+
+static void
+ram_cache_rbtree_insert(ngx_rbtree_node_t *root, ngx_rbtree_node_t *node,
+    ngx_rbtree_node_t *sentinel)
+{
+    ngx_rbtree_node_t **p;
+    ngx_http_ram_cache_entry_t *entry, *root_entry;
+    ngx_int_t rc;
+
+    for ( ;; ) {
+        if (node->key < root->key) {
+            p = &root->left;
+        } else if (node->key > root->key) {
+            p = &root->right;
+        } else {
+            entry = ngx_rbtree_data(node, ngx_http_ram_cache_entry_t, node);
+            root_entry = ngx_rbtree_data(root, ngx_http_ram_cache_entry_t,
+                                         node);
+            rc = ram_cache_compare_keys(entry->data, entry->key_len,
+                                        root_entry->data,
+                                        root_entry->key_len);
+            p = rc < 0 ? &root->left : &root->right;
+        }
+
+        if (*p == sentinel) break;
+        root = *p;
+    }
+
+    *p = node;
+    node->parent = root;
+    node->left = sentinel;
+    node->right = sentinel;
+    ngx_rbt_red(node);
 }
 
 
@@ -585,6 +649,7 @@ ram_cache_evict_one_locked(void)
             if (entry->refs != 0) {
                 continue;
             }
+            ngx_rbtree_delete(&ram_cache_conf->sh->index, &entry->node);
             ngx_queue_remove(q);
             entry->state = RAM_ENTRY_EVICTING;
             ram_cache_free_entry_locked(entry);
@@ -673,6 +738,7 @@ ram_cache_handler(ngx_http_request_t *r)
     }
     ram_cache_reap_entry_pins_locked(entry);
     if (entry->body_len > ram_cache_conf->max_object) {
+        ngx_rbtree_delete(&ram_cache_conf->sh->index, &entry->node);
         ngx_queue_remove(&entry->queue);
         entry->state = RAM_ENTRY_EXPIRED;
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->rejected, 1);
@@ -688,6 +754,7 @@ ram_cache_handler(ngx_http_request_t *r)
         || (ngx_uint_t) (now - entry->created) >= ram_cache_conf->ttl)
     {
         ram_cache_reap_pins_locked();
+        ngx_rbtree_delete(&ram_cache_conf->sh->index, &entry->node);
         ngx_queue_remove(&entry->queue);
         entry->state = RAM_ENTRY_EXPIRED;
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->expirations, 1);
@@ -889,6 +956,7 @@ ram_cache_purge_request(ngx_http_request_t *r,
             {
                 next = ngx_queue_next(q);
                 entry = ngx_queue_data(q, ngx_http_ram_cache_entry_t, queue);
+                ngx_rbtree_delete(&ram_cache_conf->sh->index, &entry->node);
                 ngx_queue_remove(q);
                 entry->state = RAM_ENTRY_EXPIRED;
                 if (entry->refs == 0) ram_cache_free_entry_locked(entry);
@@ -897,6 +965,7 @@ ram_cache_purge_request(ngx_http_request_t *r,
     } else if (ram_cache_make_key(r, &key) == NGX_OK) {
         entry = ram_cache_find(&key);
         if (entry != NULL) {
+            ngx_rbtree_delete(&ram_cache_conf->sh->index, &entry->node);
             ngx_queue_remove(&entry->queue);
             entry->state = RAM_ENTRY_EXPIRED;
             if (entry->refs == 0) ram_cache_free_entry_locked(entry);
@@ -1370,6 +1439,8 @@ ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
         entry->accounted = 1;
         ram_cache_conf->sh->used_bytes += entry->alloc_bytes;
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->objects, 1);
+        entry->node.key = ngx_crc32_long(ctx->key.data, ctx->key.len);
+        ngx_rbtree_insert(&ram_cache_conf->sh->index, &entry->node);
         ngx_queue_insert_head(&ram_cache_conf->sh->probation, &entry->queue);
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->accepted, 1);
     } else {

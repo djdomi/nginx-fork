@@ -76,7 +76,9 @@ scheme, normalized Host value, URI, query, slice range, and request headers
 favours isolation over maximum key sharing and may prevent reuse across
 requests that NGINX's configured L2 key considers equivalent. Every field is
 length-prefixed, so request-controlled delimiters cannot merge field
-boundaries; a full byte comparison determines identity.
+boundaries. Lookup uses a shared red-black tree indexed by CRC32; keys with
+the same hash are ordered and matched by full byte comparison. The integration
+suite includes distinct query keys with a deliberately colliding CRC32.
 
 ## Squid reference
 
@@ -144,14 +146,13 @@ contrib/ngx_http_ram_cache_module/test.sh \
 
 It exercises real NGINX workers, HTTP/HTTPS, Host, and query key separation,
 HEAD from cached GET metadata, and verifies GET/HEAD L1 hits do not add origin
-requests. A URI/query boundary case verifies distinct field identities even
-when naive field concatenation would produce the same bytes. It covers
-file-backed responses, multi-block objects, native slice
+requests. URI/query-boundary and deliberate CRC32-collision cases verify full
+key identity. It covers file-backed responses, multi-block objects, native slice
 assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
 reload during a pinned response, worker death during both a fill and a pinned
-L1 hit, with recovery,
+L1 hit, with recovery and pin-counter checks,
 an upstream read timeout during a partial response and recovery, concurrent
 hits, bypasses, and metrics. Worker-death recovery also checks that stale
 in-progress capture reservations are reclaimed and their counters return to

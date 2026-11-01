@@ -224,6 +224,34 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/query-beta-first.h"; then
     exit 1
 fi
 
+# These two distinct eight-byte values have the same CRC32. Their full L1 keys
+# therefore collide in the tree's hash field and must still compare by bytes.
+for identity in qRmZEfEn Af01aHyh; do
+    curl --noproxy '*' --fail --silent \
+        -D "$test_root/crc-collision-$identity-first.h" \
+        "http://127.0.0.1:$port_proxy/query-key?id=$identity" \
+        -o "$test_root/crc-collision-$identity-first.body"
+    printf '%s' "$identity" > "$test_root/crc-collision-$identity.expected"
+    cmp "$test_root/crc-collision-$identity.expected" \
+        "$test_root/crc-collision-$identity-first.body"
+done
+if rg -qi '^X-RAM-Cache: HIT' \
+    "$test_root/crc-collision-Af01aHyh-first.h"
+then
+    echo "distinct full keys with the same CRC32 incorrectly shared an L1 entry" >&2
+    exit 1
+fi
+for identity in qRmZEfEn Af01aHyh; do
+    curl --noproxy '*' --fail --silent \
+        -D "$test_root/crc-collision-$identity-hit.h" \
+        "http://127.0.0.1:$port_proxy/query-key?id=$identity" \
+        -o "$test_root/crc-collision-$identity-hit.body"
+    cmp "$test_root/crc-collision-$identity.expected" \
+        "$test_root/crc-collision-$identity-hit.body"
+    rg -qi '^X-RAM-Cache: HIT' \
+        "$test_root/crc-collision-$identity-hit.h"
+done
+
 # URI and query are separate key fields. These requests have the same plain
 # concatenation ("/identityx") but must remain distinct cache objects.
 for identity in query path; do

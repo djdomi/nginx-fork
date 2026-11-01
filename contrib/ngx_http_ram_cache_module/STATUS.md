@@ -27,8 +27,9 @@ build only; it is not a general ABI compatibility matrix.
   10% in-progress capture reservation ceiling.
 - Complete response bodies are copied into shared memory. A `READY` object is
   visible only after capture completion, L2 freshness validation, and a
-  generation check. Lookup uses a full key comparison after scanning the
-  queues; it does not rely on a hash-only identity.
+  generation check. Lookup uses a shared red-black tree indexed by CRC32 and
+  resolves collisions with a full key comparison; it does not rely on a
+  hash-only identity.
 - Response objects are pinned while being sent. Purge and expiry remove them
   from lookup immediately and defer freeing pinned objects until cleanup.
   Allocation and capture failures fall through to NGINX's normal response.
@@ -180,9 +181,10 @@ Raw values and the method are in `benchmark-results-2026-11-01.csv` and
 This implementation is not production-ready. The supplied completion criteria
 that remain open include:
 
-- No unit tests for injected hash collisions, state transitions, partial block
-  frees, SLRU byte limits, or allocator failures. The URI/query boundary case
-  is covered by integration, but there is no direct hash-collision unit test.
+- The integration test contains two distinct request keys with a deliberate
+  CRC32 collision and checks that each retains its own response. There are no
+  unit tests for state transitions, partial block frees, SLRU byte limits, or
+  allocator failures.
 - A long-running test remains open. Abrupt upstream connection reset during
   fill, full memory exhaustion, and forced allocator failure are untested. The
   controlled upstream timeout and worker-death cases passed in the final cloud
@@ -197,11 +199,12 @@ that remain open include:
 - Conditional reuse, RFC-complete Age/freshness/warning handling, `Vary`,
   stale revalidation, request cache directives, and many HTTP caching semantics
   intentionally bypass or remain unsupported.
-- The lookup is a linear scan over SLRU lists. Key construction includes
-  request headers rather than sharing the configured L2 key policy. The
-  logical used-byte metric does not report exact slab fragmentation; free
-  bytes, pinned count, lock contention, and origin-request counters are not
-  exposed. There is no external metrics endpoint.
+- L1 key construction includes request headers rather than sharing the
+  configured L2 key policy. The logical used-byte metric does not report exact
+  slab fragmentation; free bytes, lock contention, and origin-request
+  counters are not exposed. There is no external metrics endpoint. A pin count
+  variable is exposed, but it counts active response pins rather than unique
+  pinned objects.
 - NGINX reload and full process restart are tested with the same structure and
   configuration. Reloads changing key semantics, zone layout, limits, or
   slice policy have not been tested.
