@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-set -x
 
 if [ "$#" -ne 2 ]; then
     echo "usage: $0 /absolute/path/to/nginx /absolute/path/to/module.so" >&2
@@ -174,7 +173,7 @@ curl --noproxy '*' --silent --head -D "$test_root/head-hit.h" \
     "http://127.0.0.1:$port_proxy/object" -o /dev/null
 rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/head-hit.h"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/head-hit.h"
-rg -qi "^Content-Length: $(wc -c < "$test_root/miss.body" | tr -d ' ')$" \
+rg -qi "^Content-Length: $(wc -c < "$test_root/miss.body" | tr -d ' ')\\r?$" \
     "$test_root/head-hit.h"
 
 # Query parameters remain part of object identity.
