@@ -24,6 +24,7 @@ mkdir -p "$test_root/slice"
 printf '0123456789abcdefghijklmnopqrst' > "$test_root/slice/slice.bin"
 printf 'file-backed response payload\n' > "$test_root/slice/local-file"
 head -c 150000 /dev/zero | tr '\000' 'x' > "$test_root/slice/large-file"
+head -c 65536 /dev/zero | tr '\000' 'y' > "$test_root/slice/abort.bin"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$test_root/test.key" \
     -out "$test_root/test.crt" -days 1 -subj '/CN=localhost' \
     >/dev/null 2>&1
@@ -57,6 +58,7 @@ http {
         location = /object { default_type text/plain; return 200 "origin payload\\n"; }
         location = /scheme { default_type text/plain; return 200 "plain origin\\n"; }
         location = /expire { default_type text/plain; return 200 "expiring\\n"; }
+        location = /abort.bin { root $test_root/slice; limit_rate 32k; }
         location /l2/ { default_type text/plain; return 200 "origin payload\\n"; }
         location / { root $test_root/slice; }
     }
@@ -397,5 +399,41 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/conditional.h"; then
     echo "Conditional request unexpectedly hit RAM cache" >&2
     exit 1
 fi
+
+# Abort a throttled response before completion; a later full response must be
+# complete and may only be cached after its own valid completion.
+if curl --noproxy '*' --silent --limit-rate 1k --max-time 0.1 \
+    "http://127.0.0.1:$port_proxy/abort.bin" \
+    -o "$test_root/abort-partial.body"; then
+    echo "throttled client request did not abort as expected" >&2
+    exit 1
+fi
+curl --noproxy '*' --fail --silent -D "$test_root/abort-recovery.h" \
+    "http://127.0.0.1:$port_proxy/abort.bin" \
+    -o "$test_root/abort-recovery.body"
+cmp "$test_root/slice/abort.bin" "$test_root/abort-recovery.body"
+curl --noproxy '*' --fail --silent -D "$test_root/abort-recovered-hit.h" \
+    "http://127.0.0.1:$port_proxy/abort.bin" \
+    -o "$test_root/abort-recovered-hit.body"
+cmp "$test_root/slice/abort.bin" "$test_root/abort-recovered-hit.body"
+rg -qi '^X-RAM-Cache: HIT' "$test_root/abort-recovered-hit.h"
+
+# A full NGINX restart discards L1 but preserves the persistent proxy cache.
+curl --noproxy '*' --fail --silent \
+    "http://127.0.0.1:$port_proxy/object" -o /dev/null
+curl --noproxy '*' --fail --silent -D "$test_root/restart-ready.h" \
+    "http://127.0.0.1:$port_proxy/object" -o /dev/null
+rg -qi '^X-RAM-Cache: HIT' "$test_root/restart-ready.h"
+"$nginx_bin" -p "$test_root/" -c nginx.conf -s quit
+sleep 1
+"$nginx_bin" -p "$test_root/" -c nginx.conf
+sleep 1
+curl --noproxy '*' --fail --silent -D "$test_root/restart-promote.h" \
+    "http://127.0.0.1:$port_proxy/object" -o /dev/null
+rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
+    "$test_root/restart-promote.h"
+curl --noproxy '*' --fail --silent -D "$test_root/restart-hit.h" \
+    "http://127.0.0.1:$port_proxy/object" -o /dev/null
+rg -qi '^X-RAM-Cache: HIT' "$test_root/restart-hit.h"
 
 echo "RAM cache integration checks passed"

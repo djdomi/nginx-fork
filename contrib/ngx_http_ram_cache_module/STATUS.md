@@ -84,6 +84,10 @@ The test executes the real NGINX binary with two workers and verifies:
 - L1 retention across NGINX reload, 100 concurrent requests to the same cached
   object, metrics variables, and bypass for Range, Cookie, Authorization, and
   conditional requests.
+- Client abort during a throttled 64 KiB response, followed by a complete
+  byte-for-byte recovery response and a verified later L1 HIT.
+- Full NGINX process restart: L1 starts empty, a disk-cache HIT repopulates it,
+  and the following request is an L1 HIT.
 
 The localhost test requires permission to bind loopback ports in restricted
 execution environments. It was run with that permission and passed.
@@ -117,12 +121,14 @@ that remain open include:
 - No full 4-by-4 worker/client cross-product, ThreadSanitizer, LeakSanitizer,
   or long-running test. The tested pairs are 1/1, 2/10, 4/50, and 8/100.
   Parallel requests all hit the same warmed object; different-object load is
-  not yet covered. Cancellation,
-  upstream abort, worker death during fill, concurrent eviction under load,
+  not yet covered. Upstream abort, worker death during fill, concurrent
+  eviction under load,
   memory exhaustion, and failure injection are untested.
-- No exhaustive Range/slice matrix: suffix and multiple ranges, 416, changed
-  ETag or total length, missing Content-Range, upstream 200 instead of 206,
-  last short segment, changed content during fill, and cancellation are open.
+- Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
+  last slice. Standard multipart 206 with the native Slice module is not
+  provided by this configuration; changed ETag or total length, missing
+  Content-Range, upstream 200 instead of 206, and content changing during fill
+  remain untested.
 - HEAD, conditional reuse, RFC-complete Age/freshness/warning handling,
   `Vary`, stale revalidation, request cache directives, and many HTTP caching
   semantics intentionally bypass or remain unsupported.
@@ -131,9 +137,9 @@ that remain open include:
   logical used-byte metric does not report exact slab fragmentation; free
   bytes, pinned count, lock contention, and origin-request counters are not
   exposed. There is no external metrics endpoint.
-- NGINX reload is tested with the same structure and configuration. Reloads
-  changing key semantics, zone layout, limits, or slice policy have not been
-  tested. Full process restart/L2 repromotion is not tested.
+- NGINX reload and full process restart are tested with the same structure and
+  configuration. Reloads changing key semantics, zone layout, limits, or
+  slice policy have not been tested.
 - No L2 purge integration, admin UI, health checks, production image, setup,
   or update integration exists here. PURGE is an L1-only primitive; access
   control beyond its secret token must be supplied by the NGINX deployment.
