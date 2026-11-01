@@ -142,9 +142,10 @@ L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
 reload during a pinned response, worker death during a fill and recovery,
 an upstream read timeout during a partial response and recovery, concurrent
-hits, bypasses, and metrics. The GitHub workflow runs the complete worker/client
-matrix, AddressSanitizer with leak detection, and dedicated concurrent stress
-and ThreadSanitizer jobs.
+hits, bypasses, and metrics. Its stress job runs five 120-request rounds with
+distinct keys against the same 16 MiB zone. The GitHub workflow also runs the
+complete worker/client matrix, AddressSanitizer with leak detection, and
+ThreadSanitizer.
 Tests that have not been implemented are listed in `STATUS.md`.
 
 Set `RAM_CACHE_WORKERS` and `RAM_CACHE_PARALLEL_CLIENTS` to change the live

@@ -524,26 +524,36 @@ rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
 # Optional stress case: overlap many different keys so fills, admission,
 # eviction, and ordinary L2 fallback all run under shared-zone pressure.
 if [ "${RAM_CACHE_STRESS:-0}" = 1 ]; then
-    i=121
-    while [ "$i" -le 240 ]; do
-        (
-            curl --noproxy '*' --fail --silent --max-time 60 \
-                "http://127.0.0.1:$port_proxy/large-file?concurrent=$i" \
-                -o "$test_root/concurrent-$i.body" \
-                && cmp "$test_root/slice/large-file" \
-                    "$test_root/concurrent-$i.body" \
-                && touch "$test_root/concurrent-$i.ok"
-        ) &
-        i=$((i + 1))
-    done
-    wait
-    i=121
-    while [ "$i" -le 240 ]; do
-        if [ ! -f "$test_root/concurrent-$i.ok" ]; then
-            echo "concurrent multi-key request $i failed or returned corrupt bytes" >&2
-            exit 1
-        fi
-        i=$((i + 1))
+    stress_rounds=${RAM_CACHE_STRESS_ROUNDS:-1}
+    case "$stress_rounds" in
+        ''|*[!0-9]*|0) echo "RAM_CACHE_STRESS_ROUNDS must be a positive integer" >&2; exit 2 ;;
+    esac
+    round=0
+    while [ "$round" -lt "$stress_rounds" ]; do
+        first=$((121 + round * 120))
+        last=$((first + 119))
+        i=$first
+        while [ "$i" -le "$last" ]; do
+            (
+                curl --noproxy '*' --fail --silent --max-time 60 \
+                    "http://127.0.0.1:$port_proxy/large-file?concurrent=$i" \
+                    -o "$test_root/concurrent-$i.body" \
+                    && cmp "$test_root/slice/large-file" \
+                        "$test_root/concurrent-$i.body" \
+                    && touch "$test_root/concurrent-$i.ok"
+            ) &
+            i=$((i + 1))
+        done
+        wait
+        i=$first
+        while [ "$i" -le "$last" ]; do
+            if [ ! -f "$test_root/concurrent-$i.ok" ]; then
+                echo "concurrent multi-key request $i failed or returned corrupt bytes" >&2
+                exit 1
+            fi
+            i=$((i + 1))
+        done
+        round=$((round + 1))
     done
     curl --noproxy '*' --fail --silent \
         "http://127.0.0.1:$port_proxy/metrics" \

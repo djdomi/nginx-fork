@@ -110,8 +110,9 @@ client was sending a pinned 64 KiB object; the response completed byte-for-byte
 and the next request promoted the object again from L2.
 
 The expanded local stress run passed with four workers and 50 concurrent
-clients. It issued 120 simultaneous requests for distinct keys while the 16
-MiB zone was under eviction pressure and compared every response byte-for-byte.
+clients. It issued five rounds of 120 simultaneous requests for distinct keys
+while the 16 MiB zone was under eviction pressure and compared every response
+byte-for-byte.
 It also passed a configuration reload during a pinned response, a hard worker
 kill during fill, and a forced upstream read timeout during a partial response.
 Each failure case recovered with byte-correct output and a verified subsequent
@@ -122,6 +123,9 @@ stress job, ThreadSanitizer, and AddressSanitizer with LeakSanitizer enabled.
 LeakSanitizer suppresses only three NGINX core event arrays allocated by
 `ngx_event_process_init()` and not individually freed by NGINX worker shutdown;
 all other leaks remain fatal.
+The cloud stress and ThreadSanitizer jobs are now increased to five and two
+distinct-key rounds respectively; this workload change passed locally and the
+cloud rerun is pending.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
