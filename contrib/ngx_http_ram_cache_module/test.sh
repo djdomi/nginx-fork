@@ -362,7 +362,9 @@ done
 seen_workers=$(rg -io '^X-Worker: [0-9]+' "$test_root"/parallel-*.h \
     | sort -u | wc -l)
 minimum_seen_workers=1
-if [ "$worker_processes" -gt 1 ]; then minimum_seen_workers=2; fi
+if [ "$worker_processes" -gt 1 ] && [ "$parallel_clients" -gt 1 ]; then
+    minimum_seen_workers=2
+fi
 if [ "$seen_workers" -lt "$minimum_seen_workers" ]; then
     echo "shared L1 object was not observed from multiple worker processes" >&2
     exit 1

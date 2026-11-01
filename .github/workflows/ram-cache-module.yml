@@ -15,16 +15,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        include:
-          - workers: 1
-            clients: 1
-          - workers: 2
-            clients: 10
-          - workers: 4
-            clients: 50
-          - workers: 8
-            clients: 100
+        workers: [1, 2, 4, 8]
+        clients: [1, 10, 50, 100]
     env:
       RAM_CACHE_WORKERS: ${{ matrix.workers }}
       RAM_CACHE_PARALLEL_CLIENTS: ${{ matrix.clients }}
