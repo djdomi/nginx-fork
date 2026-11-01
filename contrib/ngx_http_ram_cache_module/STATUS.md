@@ -103,7 +103,11 @@ The test executes the real NGINX binary with two workers and verifies:
   `ngx_slab_alloc() failed: no memory` messages.
 
 The localhost test requires permission to bind loopback ports in restricted
-execution environments. It was run with that permission and passed.
+execution environments. The full suite passed locally with four workers and 50
+parallel clients. It also passed against the AddressSanitizer build with two
+workers and 100 parallel clients. Both runs included PURGE while a throttled
+client was sending a pinned 64 KiB object; the response completed byte-for-byte
+and the next request promoted the object again from L2.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
@@ -131,9 +135,10 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- The full 4-by-4 worker/client cross-product passed on GitHub before the
-  newest admission and reload-limit changes; these latest changes still need a
-  fresh remote run. ThreadSanitizer, LeakSanitizer, and a long-running test
+- The full 4-by-4 worker/client cross-product passed on GitHub after the
+  allocator-headroom change. A fresh remote run is required for the subsequent
+  stricter-reload and concurrent-PURGE tests. ThreadSanitizer, LeakSanitizer,
+  and a long-running test
   remain open. Parallel requests all hit the same warmed object. Multi-key
   pressure is sequential, not concurrent. Upstream abort, worker death during fill,
   concurrent eviction under load, full memory exhaustion, and forced allocator

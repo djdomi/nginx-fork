@@ -522,6 +522,29 @@ curl --noproxy '*' --fail --silent -D "$test_root/abort-recovered-hit.h" \
 cmp "$test_root/slice/abort.bin" "$test_root/abort-recovered-hit.body"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/abort-recovered-hit.h"
 
+# Pin an L1 object during a slow client transfer, PURGE it concurrently, and
+# verify that the live response completes before the object is freed.
+curl --noproxy '*' --fail --silent -D "$test_root/pinned-transfer.h" \
+    --limit-rate 32k "http://127.0.0.1:$port_proxy/abort.bin" \
+    -o "$test_root/pinned-transfer.body" &
+pinned_curl_pid=$!
+sleep 0.2
+purge_code=$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' \
+    -X PURGE -H 'X-RAM-Cache-Purge: 0123456789abcdef0123456789abcdef' \
+    "http://127.0.0.1:$port_proxy/abort.bin")
+if [ "$purge_code" != 204 ]; then
+    echo "PURGE during pinned transfer returned $purge_code, expected 204" >&2
+    exit 1
+fi
+wait "$pinned_curl_pid"
+cmp "$test_root/slice/abort.bin" "$test_root/pinned-transfer.body"
+curl --noproxy '*' --fail --silent -D "$test_root/pinned-purged-promote.h" \
+    "http://127.0.0.1:$port_proxy/abort.bin" \
+    -o "$test_root/pinned-purged-promote.body"
+cmp "$test_root/slice/abort.bin" "$test_root/pinned-purged-promote.body"
+rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
+    "$test_root/pinned-purged-promote.h"
+
 # A full NGINX restart discards L1 but preserves the persistent proxy cache.
 curl --noproxy '*' --fail --silent \
     "http://127.0.0.1:$port_proxy/object" -o /dev/null
