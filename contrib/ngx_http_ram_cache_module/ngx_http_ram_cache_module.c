@@ -55,6 +55,7 @@ struct ngx_http_ram_cache_entry_s {
     time_t            created;
     size_t            key_len;
     size_t            type_len;
+    size_t            date_len;
     size_t            etag_len;
     size_t            modified_len;
     size_t            ranges_len;
@@ -109,6 +110,7 @@ typedef struct {
     ngx_http_request_t *r;
     ngx_str_t    key;
     ngx_str_t    content_type;
+    ngx_str_t    date;
     ngx_str_t    etag;
     ngx_str_t    last_modified;
     ngx_str_t    accept_ranges;
@@ -786,7 +788,7 @@ ram_cache_handler(ngx_http_request_t *r)
                                     entry->body_len);
     }
     type = entry->data + entry->key_len;
-    etag = type + entry->type_len;
+    etag = type + entry->type_len + entry->date_len;
     modified = etag + entry->etag_len;
     ranges = modified + entry->modified_len;
     content_range = ranges + entry->ranges_len;
@@ -810,6 +812,15 @@ ram_cache_handler(ngx_http_request_t *r)
     ngx_str_set(&status->key, "X-RAM-Cache");
     ngx_str_set(&status->value, "HIT");
     status->hash = 1;
+    if (entry->date_len) {
+        status = ngx_list_push(&r->headers_out.headers);
+        if (status == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        ngx_str_set(&status->key, "Date");
+        status->value.data = type + entry->type_len;
+        status->value.len = entry->date_len;
+        status->hash = 1;
+        r->headers_out.date = status;
+    }
     if (ram_cache_add_status(r, "L1_HIT", sizeof("L1_HIT") - 1) != NGX_OK)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     if (entry->etag_len) {
@@ -1187,6 +1198,8 @@ ram_cache_header_filter(ngx_http_request_t *r)
                 ctx->expires = ngx_time()
                                + (time_t) ram_cache_conf->ttl;
                 ctx->content_type = r->headers_out.content_type;
+                if (r->headers_out.date != NULL)
+                    ctx->date = r->headers_out.date->value;
                 if (r->headers_out.etag != NULL)
                     ctx->etag = r->headers_out.etag->value;
                 if (r->headers_out.last_modified != NULL)
@@ -1323,7 +1336,8 @@ ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
     ctx->expires = ngx_min(ctx->expires, r->cache->valid_sec);
 
     block_count = (ctx->len + RAM_BLOCK_SIZE - 1) / RAM_BLOCK_SIZE;
-    metadata_len = ctx->key.len + ctx->content_type.len + ctx->etag.len
+    metadata_len = ctx->key.len + ctx->content_type.len + ctx->date.len
+                   + ctx->etag.len
                    + ctx->last_modified.len + ctx->accept_ranges.len
                    + ctx->content_range.len;
     entry_alloc = offsetof(ngx_http_ram_cache_entry_t, data)
@@ -1364,6 +1378,7 @@ ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
             entry->state = RAM_ENTRY_BUILDING;
             entry->key_len = ctx->key.len;
             entry->type_len = ctx->content_type.len;
+            entry->date_len = ctx->date.len;
             entry->etag_len = ctx->etag.len;
             entry->modified_len = ctx->last_modified.len;
             entry->ranges_len = ctx->accept_ranges.len;
@@ -1374,6 +1389,8 @@ ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
             entry->status = ctx->response_status;
             p = ngx_cpymem(entry->data, ctx->key.data, ctx->key.len);
             p = ngx_cpymem(p, ctx->content_type.data, entry->type_len);
+            if (entry->date_len)
+                p = ngx_cpymem(p, ctx->date.data, entry->date_len);
             if (entry->etag_len)
                 p = ngx_cpymem(p, ctx->etag.data, entry->etag_len);
             if (entry->modified_len)

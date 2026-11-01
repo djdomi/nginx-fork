@@ -97,6 +97,7 @@ http {
     }
     server {
         listen 127.0.0.1:$port_proxy reuseport;
+        proxy_pass_header Date;
         location /l2/ {
             ram_cache off;
             proxy_cache disk;
@@ -188,9 +189,17 @@ EOF
 chmod 500 "$test_root/disk-fail"
 curl --noproxy '*' --fail --silent -D "$test_root/miss.h" \
     "http://127.0.0.1:$port_proxy/object" -o "$test_root/miss.body"
+rg -i '^Date:' "$test_root/miss.h" | tr -d '\r' > "$test_root/miss.date"
+sleep 2
 curl --noproxy '*' --fail --silent -D "$test_root/hit.h" \
     "http://127.0.0.1:$port_proxy/object" -o "$test_root/hit.body"
+rg -i '^Date:' "$test_root/hit.h" | tr -d '\r' > "$test_root/hit.date"
 cmp "$test_root/miss.body" "$test_root/hit.body"
+if ! cmp -s "$test_root/miss.date" "$test_root/hit.date"; then
+    echo "L1 hit did not preserve the cached Date header" >&2
+    cat "$test_root/miss.date" "$test_root/hit.date" >&2
+    exit 1
+fi
 rg -qi '^X-RAM-Cache: HIT' "$test_root/hit.h"
 rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/hit.h"
 curl --noproxy '*' --silent --head -D "$test_root/head-hit.h" \

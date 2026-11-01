@@ -51,6 +51,9 @@ build only; it is not a general ABI compatibility matrix.
   configured `proxy_cache_key`.
 - HEAD can reuse metadata from a complete GET object, returns its content
   length and validators with no body, and does not capture a HEAD response.
+- A forwarded origin `Date` value is retained in shared metadata and replayed
+  on L1 hits; the integration test waits across a Date second boundary and
+  compares the original and hit headers.
 - Native slice subrequests are admitted as individual segments only when the
   slice range and body length validate and a strong ETag is present. Native
   NGINX slice/range processing constructs the client response.
@@ -144,10 +147,11 @@ node to report a successfully installed cache file. The unwritable-L2 test
 exercises this condition. Worker-death recovery verifies stale capture
 reservations are reclaimed. HEAD metadata reuse, distinct query identities,
 and origin-request counts for GET/HEAD hits are also covered. Final cloud run
-`41296445367` on commit `f313f821c` passed all 19 jobs: the complete 16-case
+`41303093321` on commit `bac378821` passed all 19 jobs: the complete 16-case
 worker/client matrix, AddressSanitizer with LeakSanitizer enabled,
-ThreadSanitizer, and the concurrent stress job. Stress issued ten rounds of
-120 distinct-key requests; ThreadSanitizer issued two rounds.
+ThreadSanitizer, and the concurrent stress job. This run includes the
+deliberate CRC32-collision test and killed-worker pin recovery. Stress issued
+ten rounds of 120 distinct-key requests; ThreadSanitizer issued two rounds.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used

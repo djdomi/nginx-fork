@@ -79,6 +79,8 @@ length-prefixed, so request-controlled delimiters cannot merge field
 boundaries. Lookup uses a shared red-black tree indexed by CRC32; keys with
 the same hash are ordered and matched by full byte comparison. The integration
 suite includes distinct query keys with a deliberately colliding CRC32.
+When the configured proxy path forwards an origin `Date` header, L1 stores and
+replays that value with the cached representation.
 
 ## Squid reference
 
