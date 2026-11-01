@@ -131,7 +131,7 @@ The module exposes `$ram_cache_requests`, `$ram_cache_hits`,
 `$ram_cache_admission_accepted`, `$ram_cache_admission_rejected`,
 `$ram_cache_allocation_failures`, `$ram_cache_used_bytes`,
 `$ram_cache_building_bytes`, `$ram_cache_object_count`,
-`$ram_cache_building_count`, `$ram_cache_l2_hits`, and
+`$ram_cache_building_count`, `$ram_cache_pin_count`, `$ram_cache_l2_hits`, and
 `$ram_cache_l2_misses`. `used_bytes` reports accounted object allocation
 charges, not exact slab fragmentation or all NGINX shared-zone overhead.
 
@@ -150,7 +150,8 @@ file-backed responses, multi-block objects, native slice
 assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
-reload during a pinned response, worker death during a fill and recovery,
+reload during a pinned response, worker death during both a fill and a pinned
+L1 hit, with recovery,
 an upstream read timeout during a partial response and recovery, concurrent
 hits, bypasses, and metrics. Worker-death recovery also checks that stale
 in-progress capture reservations are reclaimed and their counters return to

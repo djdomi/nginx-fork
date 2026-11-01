@@ -24,6 +24,7 @@ static ngx_str_t ram_cache_slice_range_name = ngx_string("slice_range");
 
 typedef struct ngx_http_ram_cache_entry_s ngx_http_ram_cache_entry_t;
 typedef struct ngx_http_ram_cache_capture_s ngx_http_ram_cache_capture_t;
+typedef struct ngx_http_ram_cache_pin_s ngx_http_ram_cache_pin_t;
 
 struct ngx_http_ram_cache_capture_s {
     ngx_queue_t   queue;
@@ -31,8 +32,16 @@ struct ngx_http_ram_cache_capture_s {
     size_t        bytes;
 };
 
+struct ngx_http_ram_cache_pin_s {
+    ngx_queue_t                  queue;
+    ngx_queue_t                  entry_queue;
+    ngx_pid_t                    pid;
+    ngx_http_ram_cache_entry_t  *entry;
+};
+
 struct ngx_http_ram_cache_entry_s {
     ngx_queue_t       queue;
+    ngx_queue_t       pins;
     ngx_uint_t        refs;
     ngx_uint_t        state;
     ngx_uint_t        protected;
@@ -57,6 +66,7 @@ typedef struct {
     ngx_queue_t       probation;
     ngx_queue_t       protected;
     ngx_queue_t       captures;
+    ngx_queue_t       pins;
     ngx_atomic_t      building;
     ngx_atomic_t      building_bytes;
     ngx_atomic_t      generation;
@@ -73,6 +83,7 @@ typedef struct {
     ngx_atomic_t      l2_hits;
     ngx_atomic_t      l2_misses;
     ngx_atomic_t      objects;
+    ngx_atomic_t      pinned;
     size_t            used_bytes;
     size_t            protected_bytes;
 } ngx_http_ram_cache_sh_t;
@@ -135,6 +146,8 @@ static u_char *ram_cache_key_field(u_char *p, const u_char *data, size_t len);
 static ngx_int_t ram_cache_is_slice_subrequest(ngx_http_request_t *r);
 static ngx_http_variable_value_t *ram_cache_slice_range(ngx_http_request_t *r);
 static void ram_cache_unpin(void *data);
+static void ram_cache_reap_pins_locked(void);
+static void ram_cache_reap_entry_pins_locked(ngx_http_ram_cache_entry_t *entry);
 static void ram_cache_release_capture(void *data);
 static void ram_cache_finalize_capture(void *data);
 static void ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx);
@@ -193,7 +206,8 @@ ram_cache_add_variables(ngx_conf_t *cf)
         ngx_string("ram_cache_object_count"),
         ngx_string("ram_cache_building_count"),
         ngx_string("ram_cache_l2_hits"),
-        ngx_string("ram_cache_l2_misses")
+        ngx_string("ram_cache_l2_misses"),
+        ngx_string("ram_cache_pin_count")
     };
     ngx_http_variable_t *var;
     ngx_uint_t i;
@@ -241,6 +255,7 @@ ram_cache_stat_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     case 13: value = ram_cache_conf->sh->building; break;
     case 14: value = ram_cache_conf->sh->l2_hits; break;
     case 15: value = ram_cache_conf->sh->l2_misses; break;
+    case 16: value = ram_cache_conf->sh->pinned; break;
     default: value = 0; break;
     }
 
@@ -335,6 +350,7 @@ ram_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
     ngx_queue_init(&sh->probation);
     ngx_queue_init(&sh->protected);
     ngx_queue_init(&sh->captures);
+    ngx_queue_init(&sh->pins);
     sh->building = 0;
     sh->building_bytes = 0;
     sh->generation = 1;
@@ -351,6 +367,7 @@ ram_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
     sh->l2_hits = 0;
     sh->l2_misses = 0;
     sh->objects = 0;
+    sh->pinned = 0;
     sh->used_bytes = 0;
     sh->protected_bytes = 0;
     shpool->data = sh;
@@ -615,6 +632,7 @@ ram_cache_handler(ngx_http_request_t *r)
     static u_char purge_method[] = "PURGE";
     ngx_str_t key;
     ngx_http_ram_cache_entry_t *entry;
+    ngx_http_ram_cache_pin_t *pin;
     ngx_pool_cleanup_t *cleanup;
     ngx_table_elt_t *status;
     ngx_buf_t *b;
@@ -647,10 +665,13 @@ ram_cache_handler(ngx_http_request_t *r)
     ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
     entry = ram_cache_find(&key);
     if (entry == NULL) {
+        ram_cache_reap_captures_locked();
+        ram_cache_reap_pins_locked();
         ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->misses, 1);
         return NGX_DECLINED;
     }
+    ram_cache_reap_entry_pins_locked(entry);
     if (entry->body_len > ram_cache_conf->max_object) {
         ngx_queue_remove(&entry->queue);
         entry->state = RAM_ENTRY_EXPIRED;
@@ -666,6 +687,7 @@ ram_cache_handler(ngx_http_request_t *r)
     if (entry->expires <= now || now < entry->created
         || (ngx_uint_t) (now - entry->created) >= ram_cache_conf->ttl)
     {
+        ram_cache_reap_pins_locked();
         ngx_queue_remove(&entry->queue);
         entry->state = RAM_ENTRY_EXPIRED;
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->expirations, 1);
@@ -676,7 +698,20 @@ ram_cache_handler(ngx_http_request_t *r)
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->misses, 1);
         return NGX_DECLINED;
     }
+    pin = ngx_slab_alloc_locked(ram_cache_conf->shpool, sizeof(*pin));
+    if (pin == NULL) {
+        ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->allocation_failures,
+                                    1);
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->misses, 1);
+        return NGX_DECLINED;
+    }
+    pin->pid = ngx_pid;
+    pin->entry = entry;
+    ngx_queue_insert_head(&ram_cache_conf->sh->pins, &pin->queue);
+    ngx_queue_insert_head(&entry->pins, &pin->entry_queue);
     entry->refs++;
+    (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->pinned, 1);
     ram_cache_protect_locked(entry);
     (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->hits, 1);
     if (r->method != NGX_HTTP_HEAD) {
@@ -690,9 +725,9 @@ ram_cache_handler(ngx_http_request_t *r)
     content_range = ranges + entry->ranges_len;
     blocks = ram_cache_blocks(entry);
     ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
-    cleanup = ngx_pool_cleanup_add(r->pool, sizeof(entry));
-    if (cleanup == NULL) { ram_cache_unpin(&entry); return NGX_HTTP_INTERNAL_SERVER_ERROR; }
-    *(ngx_http_ram_cache_entry_t **) cleanup->data = entry;
+    cleanup = ngx_pool_cleanup_add(r->pool, sizeof(pin));
+    if (cleanup == NULL) { ram_cache_unpin(&pin); return NGX_HTTP_INTERNAL_SERVER_ERROR; }
+    *(ngx_http_ram_cache_pin_t **) cleanup->data = pin;
     cleanup->handler = ram_cache_unpin;
     ctx = ngx_pcalloc(r->pool, sizeof(*ctx));
     if (ctx == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -843,6 +878,7 @@ ram_cache_purge_request(ngx_http_request_t *r,
     if (!authorized) return NGX_HTTP_FORBIDDEN;
 
     ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
+    ram_cache_reap_pins_locked();
     (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->generation, 1);
     if (r->uri.len == 1 && r->uri.data[0] == '/' && r->args.len == 0) {
         queues[0] = &ram_cache_conf->sh->probation;
@@ -1255,6 +1291,7 @@ ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
             }
 
             ngx_memzero(entry, entry_alloc);
+            ngx_queue_init(&entry->pins);
             entry->state = RAM_ENTRY_BUILDING;
             entry->key_len = ctx->key.len;
             entry->type_len = ctx->content_type.len;
@@ -1346,10 +1383,15 @@ ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
 static void
 ram_cache_unpin(void *data)
 {
-    ngx_http_ram_cache_entry_t *entry = *(ngx_http_ram_cache_entry_t **) data;
+    ngx_http_ram_cache_pin_t *pin = *(ngx_http_ram_cache_pin_t **) data;
+    ngx_http_ram_cache_entry_t *entry = pin->entry;
     ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
+    ngx_queue_remove(&pin->queue);
+    ngx_queue_remove(&pin->entry_queue);
+    ngx_slab_free_locked(ram_cache_conf->shpool, pin);
     if (entry->refs != 0) {
         entry->refs--;
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->pinned, -1);
     }
     if (entry->refs == 0 && entry->state == RAM_ENTRY_EXPIRED) {
         ram_cache_free_entry_locked(entry);
@@ -1392,5 +1434,56 @@ ram_cache_reap_captures_locked(void)
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->building_bytes,
                                    -((ngx_atomic_int_t) capture->bytes));
         ngx_slab_free_locked(ram_cache_conf->shpool, capture);
+    }
+}
+
+
+static void
+ram_cache_reap_pins_locked(void)
+{
+    ngx_queue_t *q, *next;
+    ngx_http_ram_cache_pin_t *pin;
+    ngx_http_ram_cache_entry_t *entry;
+
+    for (q = ngx_queue_head(&ram_cache_conf->sh->pins);
+         q != ngx_queue_sentinel(&ram_cache_conf->sh->pins); q = next)
+    {
+        next = ngx_queue_next(q);
+        pin = ngx_queue_data(q, ngx_http_ram_cache_pin_t, queue);
+        if (kill(pin->pid, 0) != -1 || ngx_errno != NGX_ESRCH) continue;
+        entry = pin->entry;
+        ngx_queue_remove(q);
+        ngx_queue_remove(&pin->entry_queue);
+        ngx_slab_free_locked(ram_cache_conf->shpool, pin);
+        if (entry->refs != 0) {
+            entry->refs--;
+            (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->pinned, -1);
+        }
+        if (entry->refs == 0 && entry->state == RAM_ENTRY_EXPIRED) {
+            ram_cache_free_entry_locked(entry);
+        }
+    }
+}
+
+
+static void
+ram_cache_reap_entry_pins_locked(ngx_http_ram_cache_entry_t *entry)
+{
+    ngx_queue_t *q, *next;
+    ngx_http_ram_cache_pin_t *pin;
+
+    for (q = ngx_queue_head(&entry->pins);
+         q != ngx_queue_sentinel(&entry->pins); q = next)
+    {
+        next = ngx_queue_next(q);
+        pin = ngx_queue_data(q, ngx_http_ram_cache_pin_t, entry_queue);
+        if (kill(pin->pid, 0) != -1 || ngx_errno != NGX_ESRCH) continue;
+        ngx_queue_remove(&pin->queue);
+        ngx_queue_remove(q);
+        ngx_slab_free_locked(ram_cache_conf->shpool, pin);
+        if (entry->refs != 0) {
+            entry->refs--;
+            (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->pinned, -1);
+        }
     }
 }
