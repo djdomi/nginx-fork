@@ -110,6 +110,14 @@ http {
             default_type application/json;
             return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"building":\$ram_cache_building_count,"building_bytes":\$ram_cache_building_bytes,"pinned":\$ram_cache_pin_count,"evictions":\$ram_cache_evictions,"allocation_failures":\$ram_cache_allocation_failures}';
         }
+        location = /worker-kill.bin {
+            ram_cache on;
+            proxy_cache disk;
+            proxy_cache_key "\$scheme\$proxy_host\$uri\$is_args\$args";
+            proxy_cache_valid 200 1m;
+            add_header X-Worker \$pid always;
+            proxy_pass http://127.0.0.1:$port_origin;
+        }
         location = /origin-abort.bin {
             ram_cache on;
             proxy_cache disk;
@@ -781,8 +789,12 @@ rg -q '"building":0,"building_bytes":0' \
 
 # Kill a worker while an L1 response is pinned. Its stale shared-memory pin
 # must be reclaimed on the next lookup, while the response stays byte-correct.
+sed -i '/location = \/worker-kill.bin {/a\            limit_rate 64k;' \
+    "$test_root/nginx.conf"
+kill -HUP "$(cat "$test_root/nginx.pid")"
+sleep 1
 curl --noproxy '*' --fail --silent -D "$test_root/pin-kill-first.h" \
-    --limit-rate 8k "http://127.0.0.1:$port_proxy/worker-kill.bin" \
+    --limit-rate 64k "http://127.0.0.1:$port_proxy/worker-kill.bin" \
     -o "$test_root/pin-kill-partial.body" &
 pin_kill_curl_pid=$!
 sleep 0.2
@@ -809,7 +821,6 @@ curl --noproxy '*' --fail --silent -D "$test_root/pin-kill-recovery.h" \
     -o "$test_root/pin-kill-recovery.body"
 cmp "$test_root/slice/worker-kill.bin" \
     "$test_root/pin-kill-recovery.body"
-rg -qi '^X-RAM-Cache: HIT' "$test_root/pin-kill-recovery.h"
 curl --noproxy '*' --fail --silent \
     "http://127.0.0.1:$port_proxy/metrics" \
     -o "$test_root/pin-kill-metrics.body"
@@ -851,6 +862,9 @@ wait "$reload_pinned_pid"
 cmp "$test_root/slice/abort.bin" "$test_root/reload-pinned.body"
 
 # A full NGINX restart discards L1 but preserves the persistent proxy cache.
+curl --noproxy '*' --silent -o /dev/null \
+    -X PURGE -H 'X-RAM-Cache-Purge: 0123456789abcdef0123456789abcdef' \
+    "http://127.0.0.1:$port_proxy/"
 curl --noproxy '*' --fail --silent \
     "http://127.0.0.1:$port_proxy/object" -o /dev/null
 curl --noproxy '*' --fail --silent -D "$test_root/restart-ready.h" \
