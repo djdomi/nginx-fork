@@ -1,0 +1,4 @@
+# NGINX allocates worker event arrays with ngx_alloc() in
+# ngx_event_process_init(); ngx_worker_process_exit() destroys the cycle pool
+# and exits, but those standalone arrays are not individually freed.
+leak:ngx_event_process_init

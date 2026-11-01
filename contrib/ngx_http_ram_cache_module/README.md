@@ -72,6 +72,35 @@ scheme, normalized Host value, URI, query, slice range, and request headers
 favours isolation over maximum key sharing and may prevent reuse across
 requests that NGINX's configured L2 key considers equivalent.
 
+## Squid reference
+
+The design was compared with Squid's shared-memory `MemStore` at upstream
+revision [`007c4a002f03`](https://github.com/squid-cache/squid/commit/007c4a002f03b8a2c98b54653e94537406c8a75c).
+Squid's [`MemStore`](https://github.com/squid-cache/squid/blob/007c4a002f03b8a2c98b54653e94537406c8a75c/src/MemStore.cc)
+separates its shared-memory store from disk, checks the publisher, response
+eligibility, expected/received size, and contiguity before admission, and aborts
+partial writes. Its [`StoreMap`](https://github.com/squid-cache/squid/blob/007c4a002f03b8a2c98b54653e94537406c8a75c/src/ipc/StoreMap.cc)
+uses reader/writer locks and deferred freeing for entries still in use. Its
+store copies data between worker-local storage and shared pages; this module
+instead serves pinned shared-memory blocks through NGINX output chains.
+
+The Squid v7 `cache_mem` documentation describes an ideal budget for hot,
+negative-cached, and in-transit objects, and explicitly says in-transit demand
+may exceed that budget. With shared-memory caching enabled, those in-transit
+objects remain local to workers. The v7
+`maximum_object_size_in_memory` directive rejects objects above its configured
+limit. Both directives are marked unavailable in Squid v8, so their v7 defaults
+and semantics are not treated as current universal Squid behavior. This module
+uses an explicit hard shared-zone limit, a bounded capture reservation, a
+per-object maximum, and complete-object publication before L1 lookup.
+
+Squid's heap replacement code includes LFUDA and GDSF scoring based on
+frequency, object size, recency, and dynamic aging. The NGINX module follows the
+requested byte-accounted two-queue SLRU policy instead; the Squid source is a
+reference for admission, shared-memory lifetime, and explicit replacement
+tradeoffs, not a claim of algorithm or feature parity. These differences keep
+the existing NGINX proxy cache as L2 and its native request path authoritative.
+
 ## Purge
 
 PURGE is handled by the L1 module when a shared zone is configured. Define a

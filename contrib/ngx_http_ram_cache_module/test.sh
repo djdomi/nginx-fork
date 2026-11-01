@@ -34,7 +34,9 @@ port_proxy=18083
 port_tls=18443
 
 cleanup() {
-    "$nginx_bin" -p "$test_root/" -c nginx.conf -s quit >/dev/null 2>&1 || true
+    if [ -f "$test_root/nginx.pid" ]; then
+        kill -QUIT "$(cat "$test_root/nginx.pid")" >/dev/null 2>&1 || true
+    fi
     sleep 1
     rm -rf "$test_root"
 }
@@ -306,7 +308,7 @@ curl --noproxy '*' --fail --silent -D "$test_root/l2-hit.h" \
 rg -qi '^X-Disk-Cache: HIT' "$test_root/l2-hit.h"
 sed -i 's/ram_cache off;/ram_cache on;/' "$test_root/nginx.conf"
 sed -i '/add_header X-Disk-Cache/d' "$test_root/nginx.conf"
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 1
 curl --noproxy '*' --fail --silent -D "$test_root/l2-promote.h" \
     "http://127.0.0.1:$port_proxy/l2/object" -o /dev/null
@@ -383,7 +385,7 @@ curl --noproxy '*' --fail --silent -D "$test_root/reload-rebuild.h" \
 rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
     "$test_root/reload-rebuild.h"
 
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 1
 curl --noproxy '*' --fail --silent -D "$test_root/reload.h" \
     "http://127.0.0.1:$port_proxy/object" -o "$test_root/reload.body"
@@ -452,7 +454,7 @@ curl --noproxy '*' --fail --silent -D "$test_root/config-max-ready.h" \
 rg -qi '^X-RAM-Cache: HIT' "$test_root/config-max-ready.h"
 sed -i 's/ram_cache_max_object 256k;/ram_cache_max_object 64k;/' \
     "$test_root/nginx.conf"
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 1
 curl --noproxy '*' --fail --silent -D "$test_root/config-max-reduced.h" \
     "http://127.0.0.1:$port_proxy/large-file?config-max=1" \
@@ -464,7 +466,7 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/config-max-reduced.h"; then
 fi
 sed -i 's/ram_cache_max_object 64k;/ram_cache_max_object 256k;/' \
     "$test_root/nginx.conf"
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 1
 
 # A reduced TTL applies to already-published objects after reload.
@@ -474,14 +476,14 @@ curl --noproxy '*' --fail --silent -D "$test_root/config-ttl-ready.h" \
     "http://127.0.0.1:$port_proxy/object?config-ttl=1" -o /dev/null
 rg -qi '^X-RAM-Cache: HIT' "$test_root/config-ttl-ready.h"
 sed -i 's/ram_cache_ttl 10;/ram_cache_ttl 1;/' "$test_root/nginx.conf"
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 2
 curl --noproxy '*' --fail --silent -D "$test_root/config-ttl-reduced.h" \
     "http://127.0.0.1:$port_proxy/object?config-ttl=1" -o /dev/null
 rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
     "$test_root/config-ttl-reduced.h"
 sed -i 's/ram_cache_ttl 1;/ram_cache_ttl 10;/' "$test_root/nginx.conf"
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 1
 
 # Fill beyond the 16 MiB L1 zone and verify byte-correct LRU fallback to L2.
@@ -583,7 +585,7 @@ curl --noproxy '*' --fail --silent -D "$test_root/reload-pinned.h" \
     -o "$test_root/reload-pinned.body" &
 reload_pinned_pid=$!
 sleep 0.2
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+kill -HUP "$(cat "$test_root/nginx.pid")"
 sleep 1
 wait "$reload_pinned_pid"
 cmp "$test_root/slice/abort.bin" "$test_root/reload-pinned.body"
@@ -594,7 +596,7 @@ curl --noproxy '*' --fail --silent \
 curl --noproxy '*' --fail --silent -D "$test_root/restart-ready.h" \
     "http://127.0.0.1:$port_proxy/object" -o /dev/null
 rg -qi '^X-RAM-Cache: HIT' "$test_root/restart-ready.h"
-"$nginx_bin" -p "$test_root/" -c nginx.conf -s quit
+kill -QUIT "$(cat "$test_root/nginx.pid")"
 sleep 1
 "$nginx_bin" -p "$test_root/" -c nginx.conf
 sleep 1

@@ -113,18 +113,27 @@ The expanded local stress run also passed with four workers and 50 concurrent
 clients. It issued 120 simultaneous requests for distinct keys while the 16 MiB
 zone was under eviction pressure, compared every response byte-for-byte, and
 performed a configuration reload during a pinned response without corrupting
-the transfer. Cloud-runner LeakSanitizer, ThreadSanitizer, and 8-worker stress
-results for this expanded suite are pending.
+the transfer. Cloud run `41290908894` passed all 16 worker/client combinations,
+the 8-worker concurrent stress job, and ThreadSanitizer. Its LeakSanitizer job
+found 112,640 bytes in three NGINX core event arrays from
+`ngx_event_process_init()` plus a 1,024-byte startup pool from the test's
+one-shot `nginx -s reload` utility. The test now signals the master directly,
+and the sanitizer suppresses only the documented NGINX core event-array
+allocation. The expanded suite then passed local LeakSanitizer; a cloud rerun
+with this correction is pending.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
 `ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0:halt_on_error=1`. Leak
-detection is disabled because LeakSanitizer aborts in this sandbox under
-`ptrace`. ODR checking is disabled because NGINX's generated dynamic-module
-registration defines `ngx_module_names` in both the executable and the module;
-ASan otherwise aborts before serving requests. Address, bounds, and
-use-after-free checks remained enabled. This run does not verify leaks or data
-races.
+detection was disabled for that initial ASan run. A later local run with
+`detect_leaks=1` passed after replacing test-control `nginx -s` subprocesses
+with direct master signals and suppressing only the three known NGINX worker
+event arrays allocated by `ngx_event_process_init()`. No other leaks were
+reported. ODR checking remains disabled because NGINX's generated dynamic
+module registration defines `ngx_module_names` in both the executable and the
+module; ASan otherwise aborts before serving requests. Address, bounds, and
+use-after-free checks remained enabled. ThreadSanitizer was run separately in
+GitHub Actions.
 
 GitHub Actions run `41288427080` passed on commit `e2c018d9c`. It built the
 module and passed the live integration suite for the full 4-by-4 matrix of 1,
@@ -147,10 +156,10 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- Cloud-runner LeakSanitizer, ThreadSanitizer, and the expanded 8-worker stress
-  jobs are pending. A long-running test remains open. Upstream abort, worker
-  death during fill, full memory exhaustion, and forced allocator failure are
-  untested.
+- A clean cloud LeakSanitizer rerun is pending. ThreadSanitizer and 8-worker
+  concurrent stress passed in run `41290908894`. A long-running test remains
+  open. Upstream abort, worker death during fill, full memory exhaustion, and
+  forced allocator failure are untested.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
   last slice. Standard multipart 206 with the native Slice module is not
   provided by this configuration; changed ETag or total length, missing
