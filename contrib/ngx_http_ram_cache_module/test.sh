@@ -75,7 +75,7 @@ http {
         location = /metrics {
             ram_cache off;
             default_type application/json;
-            return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes}';
+            return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"evictions":\$ram_cache_evictions}';
         }
         location = /slice.bin {
             ram_cache on;
@@ -399,6 +399,25 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/conditional.h"; then
     echo "Conditional request unexpectedly hit RAM cache" >&2
     exit 1
 fi
+
+# Fill beyond the 16 MiB L1 zone and verify byte-correct LRU fallback to L2.
+i=0
+while [ "$i" -lt 120 ]; do
+    i=$((i + 1))
+    curl --noproxy '*' --fail --silent \
+        "http://127.0.0.1:$port_proxy/large-file?evict=$i" \
+        -o "$test_root/evict.body"
+    cmp "$test_root/slice/large-file" "$test_root/evict.body"
+done
+curl --noproxy '*' --fail --silent \
+    "http://127.0.0.1:$port_proxy/metrics" -o "$test_root/eviction-metrics.body"
+rg -q '"evictions":[1-9][0-9]*' "$test_root/eviction-metrics.body"
+curl --noproxy '*' --fail --silent -D "$test_root/evicted-l2-promote.h" \
+    "http://127.0.0.1:$port_proxy/large-file?evict=1" \
+    -o "$test_root/evicted-l2-promote.body"
+cmp "$test_root/slice/large-file" "$test_root/evicted-l2-promote.body"
+rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
+    "$test_root/evicted-l2-promote.h"
 
 # Abort a throttled response before completion; a later full response must be
 # complete and may only be cached after its own valid completion.

@@ -108,9 +108,9 @@ contrib/ngx_http_ram_cache_module/test.sh \
 
 It exercises real NGINX workers, HTTP/HTTPS key separation, file-backed
 responses, multi-block objects, native slice assembly and multi-slice Range,
-L2 promotion, PURGE authorization and invalidation, expiry, reload, concurrent
-hits, bypasses, and metrics. Tests that have not been implemented are listed
-in `STATUS.md`.
+L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
+client abort recovery, serial eviction pressure, concurrent hits, bypasses,
+and metrics. Tests that have not been implemented are listed in `STATUS.md`.
 
 Set `RAM_CACHE_WORKERS` and `RAM_CACHE_PARALLEL_CLIENTS` to change the live
 test's worker and parallel-hit counts. `benchmark.sh` compares warm L2 with no

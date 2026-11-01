@@ -88,6 +88,9 @@ The test executes the real NGINX binary with two workers and verifies:
   byte-for-byte recovery response and a verified later L1 HIT.
 - Full NGINX process restart: L1 starts empty, a disk-cache HIT repopulates it,
   and the following request is an L1 HIT.
+- Sequential storage pressure from 120 distinct 150,000-byte objects in a
+  16 MiB L1 zone: the test observes eviction, verifies every response, then
+  proves an evicted object is fetched from L2 and promoted again.
 
 The localhost test requires permission to bind loopback ports in restricted
 execution environments. It was run with that permission and passed.
@@ -120,10 +123,10 @@ that remain open include:
   SLRU byte limits, or allocator failures; no automated adversarial key test.
 - No full 4-by-4 worker/client cross-product, ThreadSanitizer, LeakSanitizer,
   or long-running test. The tested pairs are 1/1, 2/10, 4/50, and 8/100.
-  Parallel requests all hit the same warmed object; different-object load is
-  not yet covered. Upstream abort, worker death during fill, concurrent
-  eviction under load,
-  memory exhaustion, and failure injection are untested.
+  Parallel requests all hit the same warmed object. Multi-key pressure is
+  sequential, not concurrent. Upstream abort, worker death during fill,
+  concurrent eviction under load, full memory exhaustion, and forced allocator
+  failure are untested.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
   last slice. Standard multipart 206 with the native Slice module is not
   provided by this configuration; changed ETag or total length, missing
