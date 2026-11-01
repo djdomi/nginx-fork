@@ -24,6 +24,7 @@ mkdir -p "$test_root/slice"
 printf '0123456789abcdefghijklmnopqrst' > "$test_root/slice/slice.bin"
 printf 'file-backed response payload\n' > "$test_root/slice/local-file"
 head -c 150000 /dev/zero | tr '\000' 'x' > "$test_root/slice/large-file"
+head -c 300000 /dev/zero | tr '\000' 'z' > "$test_root/slice/too-large"
 head -c 65536 /dev/zero | tr '\000' 'y' > "$test_root/slice/abort.bin"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$test_root/test.key" \
     -out "$test_root/test.crt" -days 1 -subj '/CN=localhost' \
@@ -57,6 +58,16 @@ http {
         access_log $test_root/origin.log origin;
         location = /object { default_type text/plain; return 200 "origin payload\\n"; }
         location = /scheme { default_type text/plain; return 200 "plain origin\\n"; }
+        location = /no-store {
+            default_type text/plain;
+            add_header Cache-Control no-store always;
+            return 200 "origin no-store\\n";
+        }
+        location = /set-cookie {
+            default_type text/plain;
+            add_header Set-Cookie 'session=private' always;
+            return 200 "origin cookie\\n";
+        }
         location = /expire { default_type text/plain; return 200 "expiring\\n"; }
         location = /abort.bin { root $test_root/slice; limit_rate 32k; }
         location /l2/ { default_type text/plain; return 200 "origin payload\\n"; }
@@ -75,7 +86,7 @@ http {
         location = /metrics {
             ram_cache off;
             default_type application/json;
-            return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"evictions":\$ram_cache_evictions}';
+            return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"evictions":\$ram_cache_evictions,"allocation_failures":\$ram_cache_allocation_failures}';
         }
         location = /slice.bin {
             ram_cache on;
@@ -144,6 +155,37 @@ curl --noproxy '*' --fail --silent -D "$test_root/large-hit.h" \
 cmp "$test_root/slice/large-file" "$test_root/large-miss.body"
 cmp "$test_root/large-miss.body" "$test_root/large-hit.body"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/large-hit.h"
+
+# Objects above the configured cap remain on the ordinary proxy-cache path.
+curl --noproxy '*' --fail --silent -D "$test_root/oversize-first.h" \
+    "http://127.0.0.1:$port_proxy/too-large" \
+    -o "$test_root/oversize-first.body"
+curl --noproxy '*' --fail --silent -D "$test_root/oversize-second.h" \
+    "http://127.0.0.1:$port_proxy/too-large" \
+    -o "$test_root/oversize-second.body"
+cmp "$test_root/slice/too-large" "$test_root/oversize-first.body"
+cmp "$test_root/oversize-first.body" "$test_root/oversize-second.body"
+if rg -qi '^X-RAM-Cache: HIT' "$test_root/oversize-second.h"; then
+    echo "object above ram_cache_max_object unexpectedly hit L1" >&2
+    exit 1
+fi
+
+# Origin cache-control and Set-Cookie responses never enter the shared L1.
+for resource in no-store set-cookie; do
+    curl --noproxy '*' --fail --silent -D "$test_root/$resource-first.h" \
+        "http://127.0.0.1:$port_proxy/$resource" \
+        -o "$test_root/$resource-first.body"
+    curl --noproxy '*' --fail --silent -D "$test_root/$resource-second.h" \
+        "http://127.0.0.1:$port_proxy/$resource" \
+        -o "$test_root/$resource-second.body"
+    cmp "$test_root/$resource-first.body" "$test_root/$resource-second.body"
+    if rg -qi '^X-RAM-Cache: HIT' "$test_root/$resource-second.h"; then
+        echo "$resource response unexpectedly hit L1" >&2
+        exit 1
+    fi
+done
+rg -qi '^Cache-Control: no-store' "$test_root/no-store-second.h"
+rg -qi '^Set-Cookie: session=private' "$test_root/set-cookie-second.h"
 
 # HTTP and HTTPS are distinct resource identities even when Host and URI match.
 curl --noproxy '*' --fail --silent -D "$test_root/http-scheme.h" \
@@ -414,6 +456,7 @@ done
 curl --noproxy '*' --fail --silent \
     "http://127.0.0.1:$port_proxy/metrics" -o "$test_root/eviction-metrics.body"
 rg -q '"evictions":[1-9][0-9]*' "$test_root/eviction-metrics.body"
+rg -q '"allocation_failures":0' "$test_root/eviction-metrics.body"
 curl --noproxy '*' --fail --silent -D "$test_root/evicted-l2-promote.h" \
     "http://127.0.0.1:$port_proxy/large-file?evict=1" \
     -o "$test_root/evicted-l2-promote.body"

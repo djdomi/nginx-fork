@@ -1074,6 +1074,7 @@ ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     ngx_chain_t *cl;
     ngx_http_ram_cache_entry_t *entry;
     size_t n, entry_alloc, metadata_len, copy_offset, block_len;
+    size_t required, usable;
     ngx_uint_t i, block_count, complete;
     u_char *p, **blocks;
 
@@ -1130,51 +1131,64 @@ ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
 
         entry = NULL;
-        for ( ;; ) {
-            entry = ngx_slab_alloc_locked(ram_cache_conf->shpool, entry_alloc);
-            if (entry == NULL) {
-                if (ram_cache_evict_one_locked() == NGX_OK) continue;
-                break;
-            }
-
-            ngx_memzero(entry, entry_alloc);
-            entry->state = RAM_ENTRY_BUILDING;
-            entry->key_len = ctx->key.len;
-            entry->type_len = ctx->content_type.len;
-            entry->etag_len = ctx->etag.len;
-            entry->modified_len = ctx->last_modified.len;
-            entry->ranges_len = ctx->accept_ranges.len;
-            entry->content_range_len = ctx->content_range.len;
-            entry->body_len = ctx->len;
-            entry->block_count = block_count;
-            entry->alloc_bytes = entry_alloc + ctx->len;
-            entry->status = ctx->response_status;
-            p = ngx_cpymem(entry->data, ctx->key.data, ctx->key.len);
-            p = ngx_cpymem(p, ctx->content_type.data, entry->type_len);
-            if (entry->etag_len) p = ngx_cpymem(p, ctx->etag.data,
-                                                entry->etag_len);
-            if (entry->modified_len) p = ngx_cpymem(p,
-                ctx->last_modified.data, entry->modified_len);
-            if (entry->ranges_len) p = ngx_cpymem(p,
-                ctx->accept_ranges.data, entry->ranges_len);
-            if (entry->content_range_len) p = ngx_cpymem(p,
-                ctx->content_range.data, entry->content_range_len);
-            blocks = ram_cache_blocks(entry);
-
-            copy_offset = 0;
-            for (i = 0; i < block_count; i++) {
-                block_len = ngx_min((size_t) RAM_BLOCK_SIZE,
-                                    ctx->len - copy_offset);
-                blocks[i] = ngx_slab_alloc_locked(ram_cache_conf->shpool,
-                                                   block_len);
-                if (blocks[i] == NULL) break;
-                copy_offset += block_len;
-            }
-            if (i == block_count) break;
-
-            ram_cache_free_entry_locked(entry);
-            entry = NULL;
+        required = entry_alloc + ctx->len;
+        usable = ram_cache_conf->zone->shm.size * 80 / 100;
+        while (required <= usable
+               && ram_cache_conf->sh->used_bytes > usable - required)
+        {
             if (ram_cache_evict_one_locked() != NGX_OK) break;
+        }
+
+        if (required <= usable
+            && ram_cache_conf->sh->used_bytes <= usable - required)
+        {
+            for ( ;; ) {
+                entry = ngx_slab_alloc_locked(ram_cache_conf->shpool,
+                                              entry_alloc);
+                if (entry == NULL) {
+                    if (ram_cache_evict_one_locked() == NGX_OK) continue;
+                    break;
+                }
+
+                ngx_memzero(entry, entry_alloc);
+                entry->state = RAM_ENTRY_BUILDING;
+                entry->key_len = ctx->key.len;
+                entry->type_len = ctx->content_type.len;
+                entry->etag_len = ctx->etag.len;
+                entry->modified_len = ctx->last_modified.len;
+                entry->ranges_len = ctx->accept_ranges.len;
+                entry->content_range_len = ctx->content_range.len;
+                entry->body_len = ctx->len;
+                entry->block_count = block_count;
+                entry->alloc_bytes = required;
+                entry->status = ctx->response_status;
+                p = ngx_cpymem(entry->data, ctx->key.data, ctx->key.len);
+                p = ngx_cpymem(p, ctx->content_type.data, entry->type_len);
+                if (entry->etag_len) p = ngx_cpymem(p, ctx->etag.data,
+                                                    entry->etag_len);
+                if (entry->modified_len) p = ngx_cpymem(p,
+                    ctx->last_modified.data, entry->modified_len);
+                if (entry->ranges_len) p = ngx_cpymem(p,
+                    ctx->accept_ranges.data, entry->ranges_len);
+                if (entry->content_range_len) p = ngx_cpymem(p,
+                    ctx->content_range.data, entry->content_range_len);
+                blocks = ram_cache_blocks(entry);
+
+                copy_offset = 0;
+                for (i = 0; i < block_count; i++) {
+                    block_len = ngx_min((size_t) RAM_BLOCK_SIZE,
+                                        ctx->len - copy_offset);
+                    blocks[i] = ngx_slab_alloc_locked(ram_cache_conf->shpool,
+                                                       block_len);
+                    if (blocks[i] == NULL) break;
+                    copy_offset += block_len;
+                }
+                if (i == block_count) break;
+
+                ram_cache_free_entry_locked(entry);
+                entry = NULL;
+                if (ram_cache_evict_one_locked() != NGX_OK) break;
+            }
         }
         if (entry == NULL) {
             ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);

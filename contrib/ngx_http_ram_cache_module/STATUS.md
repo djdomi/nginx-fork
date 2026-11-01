@@ -35,6 +35,8 @@ build only; it is not a general ABI compatibility matrix.
 - New objects enter probation; repeat hits promote them to protected, whose
   accounted bytes are capped at 80% of the shared-zone size. Allocation
   pressure evicts unpinned probation objects first, then protected objects.
+  Admission pre-evicts before accounted use exceeds 80% of the zone to leave
+  allocator headroom; allocation failure still falls back to NGINX.
 - L1 freshness is bounded by the configured TTL and the NGINX file-cache
   `valid_sec`. Admission requires `r->cache` and a still-valid L2 entry at body
   completion. The ordinary NGINX proxy path remains responsible for L2 and
@@ -80,6 +82,8 @@ The test executes the real NGINX binary with two workers and verifies:
 - L2 disk-cache hit followed by L1 promotion, including file-backed output.
 - Targeted and full L1 PURGE, wrong-token rejection, preservation of L2, and
   repromotion from L2.
+- Responses above the configured object cap, with `Cache-Control: no-store`,
+  or with `Set-Cookie` preserve their exact bodies and never report an L1 HIT.
 - L1 TTL expiry and repromotion from still-valid L2.
 - L1 retention across NGINX reload, 100 concurrent requests to the same cached
   object, metrics variables, and bypass for Range, Cookie, Authorization, and
@@ -90,7 +94,9 @@ The test executes the real NGINX binary with two workers and verifies:
   and the following request is an L1 HIT.
 - Sequential storage pressure from 120 distinct 150,000-byte objects in a
   16 MiB L1 zone: the test observes eviction, verifies every response, then
-  proves an evicted object is fetched from L2 and promoted again.
+  proves an evicted object is fetched from L2 and promoted again. It asserts
+  zero slab-allocation failures; the captured NGINX error log also had zero
+  `ngx_slab_alloc() failed: no memory` messages.
 
 The localhost test requires permission to bind loopback ports in restricted
 execution environments. It was run with that permission and passed.
@@ -121,10 +127,12 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- No full 4-by-4 worker/client cross-product, ThreadSanitizer, LeakSanitizer,
-  or long-running test. The tested pairs are 1/1, 2/10, 4/50, and 8/100.
-  Parallel requests all hit the same warmed object. Multi-key pressure is
-  sequential, not concurrent. Upstream abort, worker death during fill,
+- The full 4-by-4 worker/client cross-product passed on GitHub before the
+  newest oversize/admission and proactive-eviction changes; these latest
+  changes still need a fresh remote run. ThreadSanitizer, LeakSanitizer, and a
+  long-running test remain open. Parallel requests all hit the same warmed
+  object. Multi-key pressure is sequential, not concurrent. Upstream abort,
+  worker death during fill,
   concurrent eviction under load, full memory exhaustion, and forced allocator
   failure are untested.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
