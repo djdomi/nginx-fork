@@ -33,6 +33,7 @@ struct ngx_http_ram_cache_entry_s {
     ngx_uint_t        status;
     ngx_atomic_t      generation;
     time_t            expires;
+    time_t            created;
     size_t            key_len;
     size_t            type_len;
     size_t            etag_len;
@@ -594,6 +595,7 @@ ram_cache_handler(ngx_http_request_t *r)
     ngx_chain_t *out, *cl, **last;
     u_char *type, *etag, *modified, *ranges, *content_range, **blocks;
     size_t offset, n;
+    time_t now;
     ngx_uint_t i;
     ngx_http_ram_cache_loc_conf_t *lcf;
     ngx_http_ram_cache_ctx_t *ctx;
@@ -623,7 +625,21 @@ ram_cache_handler(ngx_http_request_t *r)
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->misses, 1);
         return NGX_DECLINED;
     }
-    if (entry->expires <= ngx_time()) {
+    if (entry->body_len > ram_cache_conf->max_object) {
+        ngx_queue_remove(&entry->queue);
+        entry->state = RAM_ENTRY_EXPIRED;
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->rejected, 1);
+        if (entry->refs == 0) {
+            ram_cache_free_entry_locked(entry);
+        }
+        ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->misses, 1);
+        return NGX_DECLINED;
+    }
+    now = ngx_time();
+    if (entry->expires <= now || now < entry->created
+        || (ngx_uint_t) (now - entry->created) >= ram_cache_conf->ttl)
+    {
         ngx_queue_remove(&entry->queue);
         entry->state = RAM_ENTRY_EXPIRED;
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->expirations, 1);
@@ -1215,6 +1231,7 @@ ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             && ctx->generation == ram_cache_conf->sh->generation) {
             entry->state = RAM_ENTRY_READY;
             entry->expires = ctx->expires;
+            entry->created = ngx_time();
             entry->accounted = 1;
             ram_cache_conf->sh->used_bytes += entry->alloc_bytes;
             (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->objects, 1);

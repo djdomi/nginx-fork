@@ -39,8 +39,9 @@ build only; it is not a general ABI compatibility matrix.
   allocator headroom; allocation failure still falls back to NGINX.
 - L1 freshness is bounded by the configured TTL and the NGINX file-cache
   `valid_sec`. Admission requires `r->cache` and a still-valid L2 entry at body
-  completion. The ordinary NGINX proxy path remains responsible for L2 and
-  origin requests.
+  completion. A reload that lowers TTL or object size invalidates existing
+  entries that no longer meet the new limits. The ordinary NGINX proxy path
+  remains responsible for L2 and origin requests.
 - HTTP and HTTPS, Host, URI, query, slice range, and request headers form the
   L1 key. Authorization, cookies, conditional requests, and non-slice Range
   requests bypass L1. The deliberately broad request-header key avoids merging
@@ -84,6 +85,9 @@ The test executes the real NGINX binary with two workers and verifies:
   repromotion from L2.
 - Responses above the configured object cap, with `Cache-Control: no-store`,
   or with `Set-Cookie` preserve their exact bodies and never report an L1 HIT.
+- Reload tests lower and restore both maximum object size and TTL; oversized
+  old entries are rejected, and entries older than a new TTL are fetched from
+  L2 again.
 - L1 TTL expiry and repromotion from still-valid L2.
 - L1 retention across NGINX reload, 100 concurrent requests to the same cached
   object, metrics variables, and bypass for Range, Cookie, Authorization, and
@@ -128,11 +132,10 @@ that remain open include:
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
 - The full 4-by-4 worker/client cross-product passed on GitHub before the
-  newest oversize/admission and proactive-eviction changes; these latest
-  changes still need a fresh remote run. ThreadSanitizer, LeakSanitizer, and a
-  long-running test remain open. Parallel requests all hit the same warmed
-  object. Multi-key pressure is sequential, not concurrent. Upstream abort,
-  worker death during fill,
+  newest admission and reload-limit changes; these latest changes still need a
+  fresh remote run. ThreadSanitizer, LeakSanitizer, and a long-running test
+  remain open. Parallel requests all hit the same warmed object. Multi-key
+  pressure is sequential, not concurrent. Upstream abort, worker death during fill,
   concurrent eviction under load, full memory exhaustion, and forced allocator
   failure are untested.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short

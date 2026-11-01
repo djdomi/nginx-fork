@@ -444,6 +444,46 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/conditional.h"; then
     exit 1
 fi
 
+# A reduced max-object size invalidates objects captured under the old config.
+curl --noproxy '*' --fail --silent \
+    "http://127.0.0.1:$port_proxy/large-file?config-max=1" -o /dev/null
+curl --noproxy '*' --fail --silent -D "$test_root/config-max-ready.h" \
+    "http://127.0.0.1:$port_proxy/large-file?config-max=1" -o /dev/null
+rg -qi '^X-RAM-Cache: HIT' "$test_root/config-max-ready.h"
+sed -i 's/ram_cache_max_object 256k;/ram_cache_max_object 64k;/' \
+    "$test_root/nginx.conf"
+"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+sleep 1
+curl --noproxy '*' --fail --silent -D "$test_root/config-max-reduced.h" \
+    "http://127.0.0.1:$port_proxy/large-file?config-max=1" \
+    -o "$test_root/config-max-reduced.body"
+cmp "$test_root/slice/large-file" "$test_root/config-max-reduced.body"
+if rg -qi '^X-RAM-Cache: HIT' "$test_root/config-max-reduced.h"; then
+    echo "oversize object from the old configuration survived reload" >&2
+    exit 1
+fi
+sed -i 's/ram_cache_max_object 64k;/ram_cache_max_object 256k;/' \
+    "$test_root/nginx.conf"
+"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+sleep 1
+
+# A reduced TTL applies to already-published objects after reload.
+curl --noproxy '*' --fail --silent \
+    "http://127.0.0.1:$port_proxy/object?config-ttl=1" -o /dev/null
+curl --noproxy '*' --fail --silent -D "$test_root/config-ttl-ready.h" \
+    "http://127.0.0.1:$port_proxy/object?config-ttl=1" -o /dev/null
+rg -qi '^X-RAM-Cache: HIT' "$test_root/config-ttl-ready.h"
+sed -i 's/ram_cache_ttl 10;/ram_cache_ttl 1;/' "$test_root/nginx.conf"
+"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+sleep 2
+curl --noproxy '*' --fail --silent -D "$test_root/config-ttl-reduced.h" \
+    "http://127.0.0.1:$port_proxy/object?config-ttl=1" -o /dev/null
+rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
+    "$test_root/config-ttl-reduced.h"
+sed -i 's/ram_cache_ttl 1;/ram_cache_ttl 10;/' "$test_root/nginx.conf"
+"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+sleep 1
+
 # Fill beyond the 16 MiB L1 zone and verify byte-correct LRU fallback to L2.
 i=0
 while [ "$i" -lt 120 ]; do
