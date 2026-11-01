@@ -55,9 +55,11 @@ both `ram_cache_ttl` and the L2 `valid_sec`. The L1 zone
 is shared by workers and survives a compatible NGINX reload; a full process
 restart starts empty.
 
-The cache is opt-in per location (`ram_cache on`). It only serves GETs that do
-not carry authorization, cookies, range outside native slice handling, or
-conditional headers. It bypasses responses with `Set-Cookie`, `Vary`, content
+The cache is opt-in per location (`ram_cache on`). It serves GETs and may
+answer HEAD from an already complete GET object, preserving its representation
+length and validators without a response body. It bypasses requests with
+authorization, cookies, range outside native slice handling, or conditional
+headers. It bypasses responses with `Set-Cookie`, `Vary`, content
 encoding, `Cache-Control`, `Expires`, unsupported status or response headers,
 unknown/oversized bodies, or incomplete/invalid slice metadata. This is a
 conservative subset, not a complete RFC 9111 shared-cache implementation.

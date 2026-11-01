@@ -165,6 +165,12 @@ curl --noproxy '*' --fail --silent -D "$test_root/hit.h" \
 cmp "$test_root/miss.body" "$test_root/hit.body"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/hit.h"
 rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/hit.h"
+curl --noproxy '*' --silent --head -D "$test_root/head-hit.h" \
+    "http://127.0.0.1:$port_proxy/object" -o "$test_root/head-hit.body"
+[ ! -s "$test_root/head-hit.body" ]
+rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/head-hit.h"
+rg -qi "^Content-Length: $(wc -c < "$test_root/miss.body" | tr -d ' ')$" \
+    "$test_root/head-hit.h"
 
 # A failed L2 cache-file install must not publish an L1 object. The origin
 # response remains available, but every request must continue to miss L1.

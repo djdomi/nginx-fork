@@ -615,7 +615,7 @@ ram_cache_handler(ngx_http_request_t *r)
     ngx_uint_t i;
     ngx_http_ram_cache_loc_conf_t *lcf;
     ngx_http_ram_cache_ctx_t *ctx;
-    ngx_int_t slice;
+    ngx_int_t slice, rc;
     ngx_http_variable_value_t *slice_value;
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_ram_cache_module);
     if (r->method_name.len == sizeof(purge_method) - 1
@@ -628,7 +628,7 @@ ram_cache_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->requests, 1);
     if ((r != r->main && !slice)
-        || !ram_cache_request_allowed(r->main, slice) || r->header_only)
+        || !ram_cache_request_allowed(r->main, slice))
     {
         (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->bypasses, 1);
         return NGX_DECLINED;
@@ -669,8 +669,10 @@ ram_cache_handler(ngx_http_request_t *r)
     entry->refs++;
     ram_cache_protect_locked(entry);
     (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->hits, 1);
-    (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->hit_bytes,
-                                entry->body_len);
+    if (r->method != NGX_HTTP_HEAD) {
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->hit_bytes,
+                                    entry->body_len);
+    }
     type = entry->data + entry->key_len;
     etag = type + entry->type_len;
     modified = etag + entry->etag_len;
@@ -728,6 +730,11 @@ ram_cache_handler(ngx_http_request_t *r)
         status->hash = 1;
         r->headers_out.content_range = status;
     }
+    if (r->method == NGX_HTTP_HEAD) {
+        rc = ngx_http_send_header(r);
+        ngx_http_finalize_request(r, rc);
+        return NGX_DONE;
+    }
     if (ngx_http_send_header(r) == NGX_ERROR) return NGX_ERROR;
     out = NULL;
     last = &out;
@@ -750,7 +757,7 @@ ram_cache_handler(ngx_http_request_t *r)
         last = &cl->next;
         offset += n;
     }
-    ngx_int_t rc = ngx_http_output_filter(r, out);
+    rc = ngx_http_output_filter(r, out);
     ngx_http_finalize_request(r, rc);
     return NGX_DONE;
 }
@@ -761,7 +768,8 @@ ram_cache_request_allowed(ngx_http_request_t *r, ngx_flag_t slice_request)
     ngx_list_part_t *part = &r->headers_in.headers.part;
     ngx_table_elt_t *h = part->elts;
     ngx_uint_t i;
-    if (r->method != NGX_HTTP_GET || r->headers_in.host == NULL
+    if ((r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD)
+        || r->headers_in.host == NULL
         || r->headers_in.content_length_n > 0 || r->headers_in.chunked
         || r->headers_in.authorization
         || r->headers_in.cookie
@@ -988,7 +996,8 @@ ram_cache_header_filter(ngx_http_request_t *r)
         r->filter_need_in_memory = 1;
         r->main_filter_need_in_memory = 1;
     }
-    if (lcf->enabled && (r == r->main || ram_cache_is_slice_subrequest(r))
+    if (lcf->enabled && r->main->method == NGX_HTTP_GET
+        && (r == r->main || ram_cache_is_slice_subrequest(r))
         && ram_cache_request_allowed(r->main, slice)
         && ram_cache_cacheable(r))
     {

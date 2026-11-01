@@ -47,6 +47,8 @@ build only; it is not a general ABI compatibility matrix.
   requests bypass L1. The deliberately broad request-header key avoids merging
   requests that may differ in representation, but does not guarantee identity
   with a site's configured `proxy_cache_key`.
+- HEAD can reuse metadata from a complete GET object, returns its content
+  length and validators with no body, and does not capture a HEAD response.
 - Native slice subrequests are admitted as individual segments only when the
   slice range and body length validate and a strong ETag is present. Native
   NGINX slice/range processing constructs the client response.
@@ -81,6 +83,8 @@ The test executes the real NGINX binary with two workers and verifies:
   origin requests. Standard multipart-206 behavior is not provided by this
   `slice` configuration.
 - L2 disk-cache hit followed by L1 promotion, including file-backed output.
+- HEAD reuses a cached GET's metadata and content length, returns no body, and
+  reports an L1 HIT.
 - An unwritable L2 cache directory preserves the byte-correct origin response
   but must not publish that response as an L1 hit.
 - Targeted and full L1 PURGE, wrong-token rejection, preservation of L2, and
@@ -185,9 +189,9 @@ that remain open include:
   provided by this configuration; changed ETag or total length, missing
   Content-Range, upstream 200 instead of 206, and content changing during fill
   remain untested.
-- HEAD, conditional reuse, RFC-complete Age/freshness/warning handling,
-  `Vary`, stale revalidation, request cache directives, and many HTTP caching
-  semantics intentionally bypass or remain unsupported.
+- Conditional reuse, RFC-complete Age/freshness/warning handling, `Vary`,
+  stale revalidation, request cache directives, and many HTTP caching semantics
+  intentionally bypass or remain unsupported.
 - The lookup is a linear scan over SLRU lists. Key construction includes
   request headers rather than sharing the configured L2 key policy. The
   logical used-byte metric does not report exact slab fragmentation; free
