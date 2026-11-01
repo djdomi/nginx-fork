@@ -175,6 +175,11 @@ rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/head-hit.h"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/head-hit.h"
 rg -qi "^Content-Length: $(wc -c < "$test_root/miss.body" | tr -d ' ')\\r?$" \
     "$test_root/head-hit.h"
+object_origin_count=$(rg -c '^/object ' "$test_root/origin.log")
+if [ "$object_origin_count" -ne 1 ]; then
+    echo "GET/HEAD L1 hits caused $object_origin_count origin requests, expected 1" >&2
+    exit 1
+fi
 
 # Query parameters remain part of object identity.
 for identity in alpha beta; do

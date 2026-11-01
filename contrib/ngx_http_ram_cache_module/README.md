@@ -141,7 +141,8 @@ contrib/ngx_http_ram_cache_module/test.sh \
 ```
 
 It exercises real NGINX workers, HTTP/HTTPS and query key separation, HEAD from
-cached GET metadata, file-backed responses, multi-block objects, native slice
+cached GET metadata, verifies GET/HEAD L1 hits do not add origin requests,
+file-backed responses, multi-block objects, native slice
 assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,

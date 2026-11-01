@@ -84,7 +84,8 @@ The test executes the real NGINX binary with two workers and verifies:
   `slice` configuration.
 - L2 disk-cache hit followed by L1 promotion, including file-backed output.
 - HEAD reuses a cached GET's metadata and content length, returns no body, and
-  reports an L1 HIT.
+  reports an L1 HIT. The test asserts that the GET and HEAD L1 hits together
+  caused exactly one origin request: the initial GET.
 - Distinct query strings create distinct objects; a repeated query reuses only
   its own byte-correct cached response.
 - An unwritable L2 cache directory preserves the byte-correct origin response
