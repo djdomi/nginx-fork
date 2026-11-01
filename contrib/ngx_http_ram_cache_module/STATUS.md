@@ -85,6 +85,8 @@ The test executes the real NGINX binary with two workers and verifies:
 - L2 disk-cache hit followed by L1 promotion, including file-backed output.
 - HEAD reuses a cached GET's metadata and content length, returns no body, and
   reports an L1 HIT.
+- Distinct query strings create distinct objects; a repeated query reuses only
+  its own byte-correct cached response.
 - An unwritable L2 cache directory preserves the byte-correct origin response
   but must not publish that response as an L1 hit.
 - Targeted and full L1 PURGE, wrong-token rejection, preservation of L2, and

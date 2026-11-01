@@ -140,8 +140,9 @@ contrib/ngx_http_ram_cache_module/test.sh \
   "$PWD/objs/nginx" "$PWD/objs/ngx_http_ram_cache_module.so"
 ```
 
-It exercises real NGINX workers, HTTP/HTTPS key separation, file-backed
-responses, multi-block objects, native slice assembly and multi-slice Range,
+It exercises real NGINX workers, HTTP/HTTPS and query key separation, HEAD from
+cached GET metadata, file-backed responses, multi-block objects, native slice
+assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
 reload during a pinned response, worker death during a fill and recovery,

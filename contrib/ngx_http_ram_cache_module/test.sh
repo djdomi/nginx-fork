@@ -73,6 +73,10 @@ http {
             add_header Set-Cookie 'session=private' always;
             return 200 "origin cookie\\n";
         }
+        location = /query-key {
+            default_type text/plain;
+            return 200 "\$arg_id";
+        }
         location = /expire { default_type text/plain; return 200 "expiring\\n"; }
         location = /abort.bin { root $test_root/slice; limit_rate 32k; }
         location = /worker-kill.bin { root $test_root/slice; limit_rate 32k; }
@@ -169,8 +173,28 @@ curl --noproxy '*' --silent --head -D "$test_root/head-hit.h" \
     "http://127.0.0.1:$port_proxy/object" -o "$test_root/head-hit.body"
 [ ! -s "$test_root/head-hit.body" ]
 rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/head-hit.h"
+rg -qi '^X-RAM-Cache: HIT' "$test_root/head-hit.h"
 rg -qi "^Content-Length: $(wc -c < "$test_root/miss.body" | tr -d ' ')$" \
     "$test_root/head-hit.h"
+
+# Query parameters remain part of object identity.
+for identity in alpha beta; do
+    curl --noproxy '*' --fail --silent -D "$test_root/query-$identity-first.h" \
+        "http://127.0.0.1:$port_proxy/query-key?id=$identity" \
+        -o "$test_root/query-$identity-first.body"
+    printf '%s' "$identity" > "$test_root/query-$identity-expected.body"
+    cmp "$test_root/query-$identity-expected.body" \
+        "$test_root/query-$identity-first.body"
+done
+curl --noproxy '*' --fail --silent -D "$test_root/query-alpha-hit.h" \
+    "http://127.0.0.1:$port_proxy/query-key?id=alpha" \
+    -o "$test_root/query-alpha-hit.body"
+cmp "$test_root/query-alpha-expected.body" "$test_root/query-alpha-hit.body"
+rg -qi '^X-RAM-Cache: HIT' "$test_root/query-alpha-hit.h"
+if rg -qi '^X-RAM-Cache: HIT' "$test_root/query-beta-first.h"; then
+    echo "different query parameter incorrectly reused an L1 object" >&2
+    exit 1
+fi
 
 # A failed L2 cache-file install must not publish an L1 object. The origin
 # response remains available, but every request must continue to miss L1.
