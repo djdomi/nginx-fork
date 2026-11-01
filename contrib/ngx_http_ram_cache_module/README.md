@@ -118,6 +118,9 @@ module, warm L2 with the module disabled, and warm L1 with the module enabled.
 The initial results and their limits are recorded in `BENCHMARK.md`; they do
 not establish a performance gain.
 
+The fork's `RAM cache module` GitHub Actions workflow builds NGINX and runs the
+integration suite for four worker/client pairs on this validation branch.
+
 ## Scope and readiness
 
 This module is a functional, tested implementation in the NGINX fork, but it

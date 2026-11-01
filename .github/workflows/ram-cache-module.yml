@@ -1,0 +1,57 @@
+name: RAM cache module
+
+on:
+  push:
+    branches:
+      - codex/ram-cache-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workers: 1
+            clients: 1
+          - workers: 2
+            clients: 10
+          - workers: 4
+            clients: 50
+          - workers: 8
+            clients: 100
+    env:
+      RAM_CACHE_WORKERS: ${{ matrix.workers }}
+      RAM_CACHE_PARALLEL_CLIENTS: ${{ matrix.clients }}
+    steps:
+      - name: Get the pushed source
+        run: |
+          git clone --quiet --no-checkout \
+            "https://github.com/${GITHUB_REPOSITORY}.git" .
+          git fetch --quiet origin "$GITHUB_SHA"
+          git checkout --quiet --detach "$GITHUB_SHA"
+
+      - name: Install build and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential libpcre2-dev libssl-dev \
+            zlib1g-dev curl ripgrep
+
+      - name: Configure and build NGINX with the dynamic module
+        run: |
+          ./auto/configure --with-compat --with-debug \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_slice_module \
+            --add-dynamic-module="$GITHUB_WORKSPACE/contrib/ngx_http_ram_cache_module"
+          make -j"$(nproc)" modules
+
+      - name: Run the live integration suite
+        run: |
+          contrib/ngx_http_ram_cache_module/test.sh \
+            "$GITHUB_WORKSPACE/objs/nginx" \
+            "$GITHUB_WORKSPACE/objs/ngx_http_ram_cache_module.so"
