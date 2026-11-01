@@ -143,7 +143,7 @@ node to report a successfully installed cache file. The unwritable-L2 test
 exercises this condition. Worker-death recovery verifies stale capture
 reservations are reclaimed. HEAD metadata reuse, distinct query identities,
 and origin-request counts for GET/HEAD hits are also covered. Final cloud run
-`41295904207` on commit `c1792981e` passed all 19 jobs: the complete 16-case
+`41296445367` on commit `f313f821c` passed all 19 jobs: the complete 16-case
 worker/client matrix, AddressSanitizer with LeakSanitizer enabled,
 ThreadSanitizer, and the concurrent stress job. Stress issued ten rounds of
 120 distinct-key requests; ThreadSanitizer issued two rounds.
