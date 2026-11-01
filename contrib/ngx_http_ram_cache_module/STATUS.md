@@ -88,6 +88,16 @@ The test executes the real NGINX binary with two workers and verifies:
 The localhost test requires permission to bind loopback ports in restricted
 execution environments. It was run with that permission and passed.
 
+The full integration suite also passed against an AddressSanitizer-instrumented
+NGINX and module build. The build used GCC `-fsanitize=address`; the run used
+`ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0:halt_on_error=1`. Leak
+detection is disabled because LeakSanitizer aborts in this sandbox under
+`ptrace`. ODR checking is disabled because NGINX's generated dynamic-module
+registration defines `ngx_module_names` in both the executable and the module;
+ASan otherwise aborts before serving requests. Address, bounds, and
+use-after-free checks remained enabled. This run does not verify leaks or data
+races.
+
 An initial benchmark was also run with three fresh trials per mode, each using
 60 warm requests at concurrency 10 against the same 1 MiB payload. It validates
 the HIT status before measurement and confirms one origin request per trial.
@@ -104,10 +114,10 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- No full 4-by-4 worker/client cross-product, sanitizer, race detector, or
-  long-running test. The tested pairs are 1/1, 2/10, 4/50, and 8/100. Parallel
-  requests all hit the same warmed object; different-object load is not yet
-  covered. Cancellation,
+- No full 4-by-4 worker/client cross-product, ThreadSanitizer, LeakSanitizer,
+  or long-running test. The tested pairs are 1/1, 2/10, 4/50, and 8/100.
+  Parallel requests all hit the same warmed object; different-object load is
+  not yet covered. Cancellation,
   upstream abort, worker death during fill, concurrent eviction under load,
   memory exhaustion, and failure injection are untested.
 - No exhaustive Range/slice matrix: suffix and multiple ranges, 416, changed

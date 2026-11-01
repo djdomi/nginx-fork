@@ -56,3 +56,44 @@ jobs:
           contrib/ngx_http_ram_cache_module/test.sh \
             "$GITHUB_WORKSPACE/objs/nginx" \
             "$GITHUB_WORKSPACE/objs/ngx_http_ram_cache_module.so"
+
+  address-sanitizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Get the pushed source
+        run: |
+          git clone --quiet --no-checkout \
+            "https://github.com/${GITHUB_REPOSITORY}.git" .
+          git fetch --quiet origin "$GITHUB_SHA"
+          git checkout --quiet --detach "$GITHUB_SHA"
+
+      - name: Install build and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential libpcre2-dev libssl-dev \
+            zlib1g-dev curl ripgrep
+
+      - name: Configure AddressSanitizer build
+        run: |
+          ASAN_OPTIONS=detect_leaks=0 ./auto/configure \
+            --builddir=/tmp/nginx-ramcache-asan --with-compat --with-debug \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_slice_module \
+            --add-dynamic-module="$GITHUB_WORKSPACE/contrib/ngx_http_ram_cache_module" \
+            --with-cc-opt='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
+            --with-ld-opt='-fsanitize=address'
+          ASAN_OPTIONS=detect_leaks=0 \
+            make -f /tmp/nginx-ramcache-asan/Makefile -j2
+          ASAN_OPTIONS=detect_leaks=0 \
+            make -f /tmp/nginx-ramcache-asan/Makefile -j2 modules
+
+      - name: Run integration suite under AddressSanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0:halt_on_error=1
+          RAM_CACHE_WORKERS: 2
+          RAM_CACHE_PARALLEL_CLIENTS: 100
+        run: |
+          contrib/ngx_http_ram_cache_module/test.sh \
+            /tmp/nginx-ramcache-asan/nginx \
+            /tmp/nginx-ramcache-asan/ngx_http_ram_cache_module.so
