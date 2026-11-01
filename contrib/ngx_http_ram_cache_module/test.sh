@@ -26,6 +26,7 @@ printf 'file-backed response payload\n' > "$test_root/slice/local-file"
 head -c 150000 /dev/zero | tr '\000' 'x' > "$test_root/slice/large-file"
 head -c 300000 /dev/zero | tr '\000' 'z' > "$test_root/slice/too-large"
 head -c 65536 /dev/zero | tr '\000' 'y' > "$test_root/slice/abort.bin"
+head -c 131072 /dev/zero | tr '\000' 'w' > "$test_root/slice/worker-kill.bin"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$test_root/test.key" \
     -out "$test_root/test.crt" -days 1 -subj '/CN=localhost' \
     >/dev/null 2>&1
@@ -72,6 +73,11 @@ http {
         }
         location = /expire { default_type text/plain; return 200 "expiring\\n"; }
         location = /abort.bin { root $test_root/slice; limit_rate 32k; }
+        location = /worker-kill.bin { root $test_root/slice; limit_rate 32k; }
+        location = /slow-origin.bin {
+            alias $test_root/slice/abort.bin;
+            limit_rate 32k;
+        }
         location /l2/ { default_type text/plain; return 200 "origin payload\\n"; }
         location / { root $test_root/slice; }
     }
@@ -89,6 +95,15 @@ http {
             ram_cache off;
             default_type application/json;
             return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"evictions":\$ram_cache_evictions,"allocation_failures":\$ram_cache_allocation_failures}';
+        }
+        location = /origin-abort.bin {
+            ram_cache on;
+            proxy_cache disk;
+            proxy_cache_key "\$scheme\$proxy_host\$uri\$is_args\$args";
+            proxy_cache_valid 200 1m;
+            proxy_read_timeout 200ms;
+            add_header X-Worker \$pid always;
+            proxy_pass http://127.0.0.1:$port_origin/slow-origin.bin;
         }
         location = /slice.bin {
             ram_cache on;
@@ -537,6 +552,33 @@ if [ "${RAM_CACHE_STRESS:-0}" = 1 ]; then
         "$test_root/concurrent-stress-metrics.body"
 fi
 
+# Force the origin to stop making progress mid-response. The partial response
+# must be discarded, and a later complete L2/L1 fill must use exact bytes.
+if curl --noproxy '*' --fail --silent --max-time 5 \
+    -D "$test_root/upstream-abort.h" \
+    "http://127.0.0.1:$port_proxy/origin-abort.bin" \
+    -o "$test_root/upstream-abort.body"; then
+    echo "rate-limited upstream did not time out during the partial response" >&2
+    exit 1
+fi
+sed -i 's/proxy_read_timeout 200ms;/proxy_read_timeout 10s;/' \
+    "$test_root/nginx.conf"
+sed -i '/location = \/slow-origin.bin {/,/}/ s/limit_rate 32k;/limit_rate 0;/' \
+    "$test_root/nginx.conf"
+kill -HUP "$(cat "$test_root/nginx.pid")"
+sleep 1
+curl --noproxy '*' --fail --silent -D "$test_root/upstream-recovery.h" \
+    "http://127.0.0.1:$port_proxy/origin-abort.bin" \
+    -o "$test_root/upstream-recovery.body"
+cmp "$test_root/slice/abort.bin" "$test_root/upstream-recovery.body"
+rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_MISS' \
+    "$test_root/upstream-recovery.h"
+curl --noproxy '*' --fail --silent -D "$test_root/upstream-recovered-hit.h" \
+    "http://127.0.0.1:$port_proxy/origin-abort.bin" \
+    -o "$test_root/upstream-recovered-hit.body"
+cmp "$test_root/slice/abort.bin" "$test_root/upstream-recovered-hit.body"
+rg -qi '^X-RAM-Cache: HIT' "$test_root/upstream-recovered-hit.h"
+
 # Abort a throttled response before completion; a later full response must be
 # complete and may only be cached after its own valid completion.
 if curl --noproxy '*' --silent --limit-rate 1k --max-time 0.1 \
@@ -554,6 +596,41 @@ curl --noproxy '*' --fail --silent -D "$test_root/abort-recovered-hit.h" \
     -o "$test_root/abort-recovered-hit.body"
 cmp "$test_root/slice/abort.bin" "$test_root/abort-recovered-hit.body"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/abort-recovered-hit.h"
+
+# Kill the proxy worker while it is filling a new, rate-limited L1/L2 object.
+# The incomplete body must remain invisible, the master must respawn the worker,
+# and a later complete fetch must be byte-correct before becoming an L1 hit.
+curl --noproxy '*' --fail --silent -D "$test_root/worker-kill-first.h" \
+    --limit-rate 8k "http://127.0.0.1:$port_proxy/worker-kill.bin" \
+    -o "$test_root/worker-kill-partial.body" &
+worker_kill_curl_pid=$!
+sleep 0.2
+worker_kill_pid=$(rg -io '^X-Worker: [0-9]+' \
+    "$test_root/worker-kill-first.h" | awk '{print $2}' | head -n 1)
+if [ -z "$worker_kill_pid" ]; then
+    echo "could not identify proxy worker during partial fill" >&2
+    exit 1
+fi
+kill -KILL "$worker_kill_pid"
+if wait "$worker_kill_curl_pid"; then
+    echo "client transfer survived killing its proxy worker" >&2
+    exit 1
+fi
+sleep 1
+curl --noproxy '*' --fail --silent -D "$test_root/worker-kill-recovery.h" \
+    "http://127.0.0.1:$port_proxy/worker-kill.bin" \
+    -o "$test_root/worker-kill-recovery.body"
+cmp "$test_root/slice/worker-kill.bin" \
+    "$test_root/worker-kill-recovery.body"
+if rg -qi '^X-RAM-Cache: HIT' "$test_root/worker-kill-recovery.h"; then
+    echo "incomplete object survived worker death and became an L1 hit" >&2
+    exit 1
+fi
+curl --noproxy '*' --fail --silent -D "$test_root/worker-kill-hit.h" \
+    "http://127.0.0.1:$port_proxy/worker-kill.bin" \
+    -o "$test_root/worker-kill-hit.body"
+cmp "$test_root/slice/worker-kill.bin" "$test_root/worker-kill-hit.body"
+rg -qi '^X-RAM-Cache: HIT' "$test_root/worker-kill-hit.h"
 
 # Pin an L1 object during a slow client transfer, PURGE it concurrently, and
 # verify that the live response completes before the object is freed.

@@ -109,18 +109,20 @@ workers and 100 parallel clients. Both runs included PURGE while a throttled
 client was sending a pinned 64 KiB object; the response completed byte-for-byte
 and the next request promoted the object again from L2.
 
-The expanded local stress run also passed with four workers and 50 concurrent
-clients. It issued 120 simultaneous requests for distinct keys while the 16 MiB
-zone was under eviction pressure, compared every response byte-for-byte, and
-performed a configuration reload during a pinned response without corrupting
-the transfer. Cloud run `41290908894` passed all 16 worker/client combinations,
-the 8-worker concurrent stress job, and ThreadSanitizer. Its LeakSanitizer job
-found 112,640 bytes in three NGINX core event arrays from
-`ngx_event_process_init()` plus a 1,024-byte startup pool from the test's
-one-shot `nginx -s reload` utility. The test now signals the master directly,
-and the sanitizer suppresses only the documented NGINX core event-array
-allocation. The expanded suite then passed local LeakSanitizer; a cloud rerun
-with this correction is pending.
+The expanded local stress run passed with four workers and 50 concurrent
+clients. It issued 120 simultaneous requests for distinct keys while the 16
+MiB zone was under eviction pressure and compared every response byte-for-byte.
+It also passed a configuration reload during a pinned response, a hard worker
+kill during fill, and a forced upstream read timeout during a partial response.
+Each failure case recovered with byte-correct output and a verified subsequent
+L1 HIT. The complete suite passed locally under AddressSanitizer and
+LeakSanitizer with these cases enabled. Cloud run `41291572013` passed all 16
+worker/client combinations, the 8-worker concurrent stress job, ThreadSanitizer,
+and AddressSanitizer with LeakSanitizer enabled before the latest worker-death
+and upstream-timeout cases were added. LeakSanitizer suppresses only three NGINX
+core event arrays allocated by `ngx_event_process_init()` and not individually
+freed by NGINX worker shutdown; all other leaks remain fatal. A new cloud run
+for the added failure cases is pending.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
@@ -156,10 +158,10 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- A clean cloud LeakSanitizer rerun is pending. ThreadSanitizer and 8-worker
-  concurrent stress passed in run `41290908894`. A long-running test remains
-  open. Upstream abort, worker death during fill, full memory exhaustion, and
-  forced allocator failure are untested.
+- A long-running test remains open. Abrupt upstream connection reset during
+  fill, full memory exhaustion, and forced allocator failure are untested. The
+  controlled upstream timeout and worker-death cases are locally verified and
+  included in the pending cloud run.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
   last slice. Standard multipart 206 with the native Slice module is not
   provided by this configuration; changed ETag or total length, missing

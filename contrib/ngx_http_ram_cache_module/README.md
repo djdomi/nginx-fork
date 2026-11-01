@@ -139,9 +139,11 @@ It exercises real NGINX workers, HTTP/HTTPS key separation, file-backed
 responses, multi-block objects, native slice assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
-reload during a pinned response, concurrent hits, bypasses, and metrics. The
-GitHub workflow runs the complete worker/client matrix, AddressSanitizer with
-leak detection, and dedicated concurrent stress and ThreadSanitizer jobs.
+reload during a pinned response, worker death during a fill and recovery,
+an upstream read timeout during a partial response and recovery, concurrent
+hits, bypasses, and metrics. The GitHub workflow runs the complete worker/client
+matrix, AddressSanitizer with leak detection, and dedicated concurrent stress
+and ThreadSanitizer jobs.
 Tests that have not been implemented are listed in `STATUS.md`.
 
 Set `RAM_CACHE_WORKERS` and `RAM_CACHE_PARALLEL_CLIENTS` to change the live
