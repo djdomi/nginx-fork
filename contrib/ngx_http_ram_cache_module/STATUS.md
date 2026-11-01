@@ -87,9 +87,9 @@ The test executes the real NGINX binary with two workers and verifies:
 - HEAD reuses a cached GET's metadata and content length, returns no body, and
   reports an L1 HIT. The test asserts that the GET and HEAD L1 hits together
   caused exactly one origin request: the initial GET.
-- Distinct Host values and query strings create distinct objects; a repeated
-  query reuses only
-  its own byte-correct cached response.
+- Distinct Host values and query strings create distinct objects; repeated
+  requests reuse only their own byte-correct cached responses. L1 key fields
+  use length prefixes and a full byte comparison.
 - An unwritable L2 cache directory preserves the byte-correct origin response
   but must not publish that response as an L1 hit.
 - Targeted and full L1 PURGE, wrong-token rejection, preservation of L2, and
@@ -142,10 +142,11 @@ node to report a successfully installed cache file. The unwritable-L2 test
 exercises this condition. Worker-death recovery verifies stale capture
 reservations are reclaimed. HEAD metadata reuse, distinct query identities,
 and origin-request counts for GET/HEAD hits are also covered. Final cloud run
-`41294933254` on commit `111ced6fb` passed all 19 jobs: the complete 16-case
+`41295454673` on commit `91ab2fbf8` passed all 19 jobs: the complete 16-case
 worker/client matrix, AddressSanitizer with LeakSanitizer enabled,
 ThreadSanitizer, and the concurrent stress job. Stress issued five rounds of
 120 distinct-key requests; ThreadSanitizer issued two rounds.
+The stress workflow has since been raised to ten rounds; that rerun is pending.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used

@@ -143,8 +143,8 @@ contrib/ngx_http_ram_cache_module/test.sh \
 ```
 
 It exercises real NGINX workers, HTTP/HTTPS, Host, and query key separation,
-HEAD from cached GET metadata, verifies GET/HEAD L1 hits do not add origin requests,
-file-backed responses, multi-block objects, native slice
+HEAD from cached GET metadata, and verifies GET/HEAD L1 hits do not add origin
+requests. It covers file-backed responses, multi-block objects, native slice
 assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
 client abort recovery, serial and concurrent multi-key eviction pressure,
@@ -153,7 +153,7 @@ an upstream read timeout during a partial response and recovery, concurrent
 hits, bypasses, and metrics. Worker-death recovery also checks that stale
 in-progress capture reservations are reclaimed and their counters return to
 zero. Reclamation occurs on a later eligible response. Its stress job runs
-five 120-request rounds with distinct keys against the same 16 MiB zone. The
+ten 120-request rounds with distinct keys against the same 16 MiB zone. The
 suite also makes the L2 cache directory unwritable and verifies that origin
 responses still reach the client without becoming L1 hits. The GitHub workflow
 runs the complete worker/client matrix, AddressSanitizer with leak detection,
