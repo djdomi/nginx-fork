@@ -131,6 +131,7 @@ static ngx_int_t ram_cache_handler(ngx_http_request_t *r);
 static ngx_int_t ram_cache_header_filter(ngx_http_request_t *r);
 static ngx_int_t ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
 static ngx_int_t ram_cache_make_key(ngx_http_request_t *r, ngx_str_t *key);
+static u_char *ram_cache_key_field(u_char *p, const u_char *data, size_t len);
 static ngx_int_t ram_cache_is_slice_subrequest(ngx_http_request_t *r);
 static ngx_http_variable_value_t *ram_cache_slice_range(ngx_http_request_t *r);
 static void ram_cache_unpin(void *data);
@@ -411,7 +412,8 @@ ram_cache_make_key(ngx_http_request_t *r, ngx_str_t *key)
     }
 #endif
 
-    len = scheme_len + host_len + r->uri.len + args_len + slice_len + 4;
+    len = 5 * sizeof(size_t) + scheme_len + host_len + r->uri.len
+          + args_len + slice_len;
     part = &r->headers_in.headers.part;
     h = part->elts;
     for (;;) {
@@ -419,7 +421,7 @@ ram_cache_make_key(ngx_http_request_t *r, ngx_str_t *key)
             if (h[i].hash
                 && !(slice_len && RAM_HEADER(h[i], "Range"))
                 && !RAM_HEADER(h[i], "X-RAM-Cache-Purge"))
-                len += h[i].key.len + h[i].value.len + 2;
+                len += 2 * sizeof(size_t) + h[i].key.len + h[i].value.len;
         }
         if (part->next == NULL) break;
         part = part->next; h = part->elts;
@@ -428,15 +430,13 @@ ram_cache_make_key(ngx_http_request_t *r, ngx_str_t *key)
     key->data = ngx_pnalloc(r->pool, key->len);
     if (key->data == NULL) return NGX_ERROR;
     p = key->data;
-    p = ngx_cpymem(p, scheme, scheme_len);
-    *p++ = '|';
-    if (host_len) p = ngx_cpymem(p, r->headers_in.host->value.data, host_len);
-    *p++ = '|';
-    p = ngx_cpymem(p, r->uri.data, r->uri.len);
-    *p++ = '?';
-    if (args_len) p = ngx_cpymem(p, r->args.data, args_len);
-    *p++ = '|';
-    if (slice_len) p = ngx_cpymem(p, slice_value->data, slice_len);
+    p = ram_cache_key_field(p, scheme, scheme_len);
+    p = ram_cache_key_field(p,
+        r->headers_in.host ? r->headers_in.host->value.data : NULL, host_len);
+    p = ram_cache_key_field(p, r->uri.data, r->uri.len);
+    p = ram_cache_key_field(p, r->args.data, args_len);
+    p = ram_cache_key_field(p,
+        slice_len ? slice_value->data : NULL, slice_len);
     part = &r->headers_in.headers.part;
     h = part->elts;
     for (;;) {
@@ -444,14 +444,24 @@ ram_cache_make_key(ngx_http_request_t *r, ngx_str_t *key)
             if (h[i].hash
                 && !(slice_len && RAM_HEADER(h[i], "Range"))
                 && !RAM_HEADER(h[i], "X-RAM-Cache-Purge")) {
-                *p++ = '\n'; p = ngx_cpymem(p, h[i].key.data, h[i].key.len);
-                *p++ = ':'; p = ngx_cpymem(p, h[i].value.data, h[i].value.len);
+                p = ram_cache_key_field(p, h[i].key.data, h[i].key.len);
+                p = ram_cache_key_field(p, h[i].value.data, h[i].value.len);
             }
         }
         if (part->next == NULL) break;
         part = part->next; h = part->elts;
     }
     return NGX_OK;
+}
+
+
+static u_char *
+ram_cache_key_field(u_char *p, const u_char *data, size_t len)
+{
+    ngx_memcpy(p, &len, sizeof(len));
+    p += sizeof(len);
+    if (len != 0) p = ngx_cpymem(p, data, len);
+    return p;
 }
 
 

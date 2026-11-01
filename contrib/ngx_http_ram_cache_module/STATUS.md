@@ -43,10 +43,11 @@ build only; it is not a general ABI compatibility matrix.
   entries that no longer meet the new limits. The ordinary NGINX proxy path
   remains responsible for L2 and origin requests.
 - HTTP and HTTPS, Host, URI, query, slice range, and request headers form the
-  L1 key. Authorization, cookies, conditional requests, and non-slice Range
-  requests bypass L1. The deliberately broad request-header key avoids merging
-  requests that may differ in representation, but does not guarantee identity
-  with a site's configured `proxy_cache_key`.
+  L1 key. Fields use length prefixes and full byte comparison. Authorization,
+  cookies, conditional requests, and non-slice Range requests bypass L1. The
+  deliberately broad request-header key avoids merging requests that may
+  differ in representation, but does not guarantee identity with a site's
+  configured `proxy_cache_key`.
 - HEAD can reuse metadata from a complete GET object, returns its content
   length and validators with no body, and does not capture a HEAD response.
 - Native slice subrequests are admitted as individual segments only when the
@@ -86,7 +87,8 @@ The test executes the real NGINX binary with two workers and verifies:
 - HEAD reuses a cached GET's metadata and content length, returns no body, and
   reports an L1 HIT. The test asserts that the GET and HEAD L1 hits together
   caused exactly one origin request: the initial GET.
-- Distinct query strings create distinct objects; a repeated query reuses only
+- Distinct Host values and query strings create distinct objects; a repeated
+  query reuses only
   its own byte-correct cached response.
 - An unwritable L2 cache directory preserves the byte-correct origin response
   but must not publish that response as an L1 hit.

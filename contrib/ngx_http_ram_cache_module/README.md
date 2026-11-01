@@ -74,7 +74,9 @@ Non-slice range and conditional requests bypass L1. The cache key contains the
 scheme, normalized Host value, URI, query, slice range, and request headers
 (except the consumed slice Range and purge credential). This deliberately
 favours isolation over maximum key sharing and may prevent reuse across
-requests that NGINX's configured L2 key considers equivalent.
+requests that NGINX's configured L2 key considers equivalent. Every field is
+length-prefixed, so request-controlled delimiters cannot merge field
+boundaries; a full byte comparison determines identity.
 
 ## Squid reference
 
@@ -140,8 +142,8 @@ contrib/ngx_http_ram_cache_module/test.sh \
   "$PWD/objs/nginx" "$PWD/objs/ngx_http_ram_cache_module.so"
 ```
 
-It exercises real NGINX workers, HTTP/HTTPS and query key separation, HEAD from
-cached GET metadata, verifies GET/HEAD L1 hits do not add origin requests,
+It exercises real NGINX workers, HTTP/HTTPS, Host, and query key separation,
+HEAD from cached GET metadata, verifies GET/HEAD L1 hits do not add origin requests,
 file-backed responses, multi-block objects, native slice
 assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,

@@ -77,6 +77,10 @@ http {
             default_type text/plain;
             return 200 "\$arg_id";
         }
+        location = /host-key {
+            default_type text/plain;
+            return 200 "\$host";
+        }
         location = /expire { default_type text/plain; return 200 "expiring\\n"; }
         location = /abort.bin { root $test_root/slice; limit_rate 32k; }
         location = /worker-kill.bin { root $test_root/slice; limit_rate 32k; }
@@ -117,6 +121,14 @@ http {
             proxy_cache_key \$uri;
             proxy_cache_valid 200 1m;
             proxy_pass http://127.0.0.1:$port_origin/l2/;
+        }
+        location = /host-key {
+            ram_cache on;
+            proxy_cache disk;
+            proxy_cache_key "\$scheme\$proxy_host\$host\$uri\$is_args\$args";
+            proxy_cache_valid 200 1m;
+            proxy_set_header Host \$host;
+            proxy_pass http://127.0.0.1:$port_origin;
         }
         location = /slice.bin {
             ram_cache on;
@@ -199,6 +211,27 @@ if rg -qi '^X-RAM-Cache: HIT' "$test_root/query-beta-first.h"; then
     echo "different query parameter incorrectly reused an L1 object" >&2
     exit 1
 fi
+
+# Host is part of object identity when the L2 key and origin representation
+# are host-sensitive.
+for identity in host-a host-b; do
+    curl --noproxy '*' --fail --silent -D "$test_root/$identity-first.h" \
+        -H "Host: $identity.cache.test" \
+        "http://127.0.0.1:$port_proxy/host-key" \
+        -o "$test_root/$identity-first.body"
+    printf '%s.cache.test' "$identity" > "$test_root/$identity-expected.body"
+    cmp "$test_root/$identity-expected.body" "$test_root/$identity-first.body"
+done
+if rg -qi '^X-RAM-Cache: HIT' "$test_root/host-b-first.h"; then
+    echo "different Host incorrectly reused an L1 object" >&2
+    exit 1
+fi
+curl --noproxy '*' --fail --silent -D "$test_root/host-b-hit.h" \
+    -H 'Host: host-b.cache.test' \
+    "http://127.0.0.1:$port_proxy/host-key" \
+    -o "$test_root/host-b-hit.body"
+cmp "$test_root/host-b-expected.body" "$test_root/host-b-hit.body"
+rg -qi '^X-RAM-Cache: HIT' "$test_root/host-b-hit.h"
 
 # A failed L2 cache-file install must not publish an L1 object. The origin
 # response remains available, but every request must continue to miss L1.
