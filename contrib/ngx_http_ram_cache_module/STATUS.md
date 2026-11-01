@@ -109,6 +109,13 @@ workers and 100 parallel clients. Both runs included PURGE while a throttled
 client was sending a pinned 64 KiB object; the response completed byte-for-byte
 and the next request promoted the object again from L2.
 
+The expanded local stress run also passed with four workers and 50 concurrent
+clients. It issued 120 simultaneous requests for distinct keys while the 16 MiB
+zone was under eviction pressure, compared every response byte-for-byte, and
+performed a configuration reload during a pinned response without corrupting
+the transfer. Cloud-runner LeakSanitizer, ThreadSanitizer, and 8-worker stress
+results for this expanded suite are pending.
+
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
 `ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0:halt_on_error=1`. Leak
@@ -140,11 +147,10 @@ that remain open include:
 
 - No unit tests for key collisions, state transitions, partial block frees,
   SLRU byte limits, or allocator failures; no automated adversarial key test.
-- ThreadSanitizer, LeakSanitizer, and a long-running test remain open. Parallel
-  requests all hit the same warmed object. Multi-key
-  pressure is sequential, not concurrent. Upstream abort, worker death during fill,
-  concurrent eviction under load, full memory exhaustion, and forced allocator
-  failure are untested.
+- Cloud-runner LeakSanitizer, ThreadSanitizer, and the expanded 8-worker stress
+  jobs are pending. A long-running test remains open. Upstream abort, worker
+  death during fill, full memory exhaustion, and forced allocator failure are
+  untested.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
   last slice. Standard multipart 206 with the native Slice module is not
   provided by this configuration; changed ETag or total length, missing

@@ -109,8 +109,11 @@ contrib/ngx_http_ram_cache_module/test.sh \
 It exercises real NGINX workers, HTTP/HTTPS key separation, file-backed
 responses, multi-block objects, native slice assembly and multi-slice Range,
 L2 promotion, PURGE authorization and invalidation, expiry, reload and restart,
-client abort recovery, serial eviction pressure, concurrent hits, bypasses,
-and metrics. Tests that have not been implemented are listed in `STATUS.md`.
+client abort recovery, serial and concurrent multi-key eviction pressure,
+reload during a pinned response, concurrent hits, bypasses, and metrics. The
+GitHub workflow runs the complete worker/client matrix, AddressSanitizer with
+leak detection, and dedicated concurrent stress and ThreadSanitizer jobs.
+Tests that have not been implemented are listed in `STATUS.md`.
 
 Set `RAM_CACHE_WORKERS` and `RAM_CACHE_PARALLEL_CLIENTS` to change the live
 test's worker and parallel-hit counts. `benchmark.sh` compares warm L2 with no
@@ -119,7 +122,7 @@ The initial results and their limits are recorded in `BENCHMARK.md`; they do
 not establish a performance gain.
 
 The fork's `RAM cache module` GitHub Actions workflow builds NGINX and runs the
-integration suite for four worker/client pairs on this validation branch.
+integration suite across the worker/client matrix on this validation branch.
 
 ## Scope and readiness
 

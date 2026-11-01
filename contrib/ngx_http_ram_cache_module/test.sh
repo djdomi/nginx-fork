@@ -504,6 +504,37 @@ cmp "$test_root/slice/large-file" "$test_root/evicted-l2-promote.body"
 rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
     "$test_root/evicted-l2-promote.h"
 
+# Optional stress case: overlap many different keys so fills, admission,
+# eviction, and ordinary L2 fallback all run under shared-zone pressure.
+if [ "${RAM_CACHE_STRESS:-0}" = 1 ]; then
+    i=121
+    while [ "$i" -le 240 ]; do
+        (
+            curl --noproxy '*' --fail --silent --max-time 60 \
+                "http://127.0.0.1:$port_proxy/large-file?concurrent=$i" \
+                -o "$test_root/concurrent-$i.body" \
+                && cmp "$test_root/slice/large-file" \
+                    "$test_root/concurrent-$i.body" \
+                && touch "$test_root/concurrent-$i.ok"
+        ) &
+        i=$((i + 1))
+    done
+    wait
+    i=121
+    while [ "$i" -le 240 ]; do
+        if [ ! -f "$test_root/concurrent-$i.ok" ]; then
+            echo "concurrent multi-key request $i failed or returned corrupt bytes" >&2
+            exit 1
+        fi
+        i=$((i + 1))
+    done
+    curl --noproxy '*' --fail --silent \
+        "http://127.0.0.1:$port_proxy/metrics" \
+        -o "$test_root/concurrent-stress-metrics.body"
+    rg -q '"evictions":[1-9][0-9]*' \
+        "$test_root/concurrent-stress-metrics.body"
+fi
+
 # Abort a throttled response before completion; a later full response must be
 # complete and may only be cached after its own valid completion.
 if curl --noproxy '*' --silent --limit-rate 1k --max-time 0.1 \
@@ -544,6 +575,18 @@ curl --noproxy '*' --fail --silent -D "$test_root/pinned-purged-promote.h" \
 cmp "$test_root/slice/abort.bin" "$test_root/pinned-purged-promote.body"
 rg -qi '^X-RAM-Cache-Status: L1_MISS_L2_HIT' \
     "$test_root/pinned-purged-promote.h"
+
+# Reload while a client is pinned to an L1 body. The old worker must retain its
+# reference until the response is complete while the new workers start.
+curl --noproxy '*' --fail --silent -D "$test_root/reload-pinned.h" \
+    --limit-rate 32k "http://127.0.0.1:$port_proxy/abort.bin" \
+    -o "$test_root/reload-pinned.body" &
+reload_pinned_pid=$!
+sleep 0.2
+"$nginx_bin" -p "$test_root/" -c nginx.conf -s reload
+sleep 1
+wait "$reload_pinned_pid"
+cmp "$test_root/slice/abort.bin" "$test_root/reload-pinned.body"
 
 # A full NGINX restart discards L1 but preserves the persistent proxy cache.
 curl --noproxy '*' --fail --silent \
