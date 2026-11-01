@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+set -x
 
 if [ "$#" -ne 2 ]; then
     echo "usage: $0 /absolute/path/to/nginx /absolute/path/to/module.so" >&2
