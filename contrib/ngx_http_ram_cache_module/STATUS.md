@@ -130,22 +130,20 @@ It also passed a configuration reload during a pinned response, a hard worker
 kill during fill, and a forced upstream read timeout during a partial response.
 Each failure case recovered with byte-correct output and a verified subsequent
 L1 HIT. The complete suite passed locally under AddressSanitizer and
-LeakSanitizer with these cases enabled. Final cloud run `41292199105` on commit
-`03d633eea` passed all 16 worker/client combinations, the 8-worker concurrent
-stress job, ThreadSanitizer, and AddressSanitizer with LeakSanitizer enabled.
+LeakSanitizer with these cases enabled.
 LeakSanitizer suppresses only three NGINX core event arrays allocated by
 `ngx_event_process_init()` and not individually freed by NGINX worker shutdown;
 all other leaks remain fatal.
-The final cloud run `41292723878` on commit `3da9b266a` passed all 19 jobs:
-the complete 16-combination worker/client matrix, AddressSanitizer with
-LeakSanitizer enabled, ThreadSanitizer, and the expanded concurrent stress
-job. The stress job issued five rounds of 120 distinct-key requests; the
-ThreadSanitizer job issued two rounds. Both sanitizer and stress jobs passed
-with the expanded failure and recovery cases enabled.
 
 Capture publication now runs from request cleanup and requires NGINX's cache
 node to report a successfully installed cache file. The unwritable-L2 test
-exercises this condition. The run for this change is pending.
+exercises this condition. Worker-death recovery verifies stale capture
+reservations are reclaimed. HEAD metadata reuse, distinct query identities,
+and origin-request counts for GET/HEAD hits are also covered. Final cloud run
+`41294933254` on commit `111ced6fb` passed all 19 jobs: the complete 16-case
+worker/client matrix, AddressSanitizer with LeakSanitizer enabled,
+ThreadSanitizer, and the concurrent stress job. Stress issued five rounds of
+120 distinct-key requests; ThreadSanitizer issued two rounds.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
