@@ -94,7 +94,7 @@ http {
         location = /metrics {
             ram_cache off;
             default_type application/json;
-            return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"evictions":\$ram_cache_evictions,"allocation_failures":\$ram_cache_allocation_failures}';
+            return 200 '{"hits":\$ram_cache_hits,"misses":\$ram_cache_misses,"l2_hits":\$ram_cache_l2_hits,"l2_misses":\$ram_cache_l2_misses,"objects":\$ram_cache_object_count,"used_bytes":\$ram_cache_used_bytes,"building":\$ram_cache_building_count,"building_bytes":\$ram_cache_building_bytes,"evictions":\$ram_cache_evictions,"allocation_failures":\$ram_cache_allocation_failures}';
         }
         location = /origin-abort.bin {
             ram_cache on;
@@ -641,6 +641,10 @@ curl --noproxy '*' --fail --silent -D "$test_root/worker-kill-hit.h" \
     -o "$test_root/worker-kill-hit.body"
 cmp "$test_root/slice/worker-kill.bin" "$test_root/worker-kill-hit.body"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/worker-kill-hit.h"
+curl --noproxy '*' --fail --silent \
+    "http://127.0.0.1:$port_proxy/metrics" -o "$test_root/worker-kill-metrics.body"
+rg -q '"building":0,"building_bytes":0' \
+    "$test_root/worker-kill-metrics.body"
 
 # Pin an L1 object during a slow client transfer, PURGE it concurrently, and
 # verify that the live response completes before the object is freed.

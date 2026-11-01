@@ -94,6 +94,10 @@ The test executes the real NGINX binary with two workers and verifies:
   conditional requests.
 - Client abort during a throttled 64 KiB response, followed by a complete
   byte-for-byte recovery response and a verified later L1 HIT.
+- Worker death during a fill, followed by byte-correct recovery. Capture
+  reservations are tracked in shared memory by worker PID; a later fill reaps
+  reservations whose worker no longer exists. The integration test verifies
+  both building-object and reserved-byte counters return to zero.
 - Full NGINX process restart: L1 starts empty, a disk-cache HIT repopulates it,
   and the following request is an L1 HIT.
 - Sequential storage pressure from 120 distinct 150,000-byte objects in a
@@ -123,9 +127,12 @@ stress job, ThreadSanitizer, and AddressSanitizer with LeakSanitizer enabled.
 LeakSanitizer suppresses only three NGINX core event arrays allocated by
 `ngx_event_process_init()` and not individually freed by NGINX worker shutdown;
 all other leaks remain fatal.
-The cloud stress and ThreadSanitizer jobs are now increased to five and two
-distinct-key rounds respectively; this workload change passed locally and the
-cloud rerun is pending.
+The final cloud run `41292723878` on commit `3da9b266a` passed all 19 jobs:
+the complete 16-combination worker/client matrix, AddressSanitizer with
+LeakSanitizer enabled, ThreadSanitizer, and the expanded concurrent stress
+job. The stress job issued five rounds of 120 distinct-key requests; the
+ThreadSanitizer job issued two rounds. Both sanitizer and stress jobs passed
+with the expanded failure and recovery cases enabled.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
@@ -164,7 +171,9 @@ that remain open include:
 - A long-running test remains open. Abrupt upstream connection reset during
   fill, full memory exhaustion, and forced allocator failure are untested. The
   controlled upstream timeout and worker-death cases passed in the final cloud
-  run.
+  run. A worker killed during capture can leave a reservation until the next
+  eligible response runs the stale-worker reaper; no timer-based background
+  reaper is installed.
 - Range tests cover suffix and non-aligned ranges, If-Range, 416, and a short
   last slice. Standard multipart 206 with the native Slice module is not
   provided by this configuration; changed ETag or total length, missing
