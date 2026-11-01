@@ -48,6 +48,7 @@ jobs:
             --with-http_ssl_module --with-http_v2_module \
             --with-http_slice_module \
             --add-dynamic-module="$GITHUB_WORKSPACE/contrib/ngx_http_ram_cache_module"
+          make -j"$(nproc)"
           make -j"$(nproc)" modules
 
       - name: Run the live integration suite
