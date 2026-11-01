@@ -20,6 +20,7 @@ fi
 test_root=$(mktemp -d)
 mkdir -p "$test_root/logs"
 mkdir -p "$test_root/disk"
+mkdir -p "$test_root/disk-fail"
 mkdir -p "$test_root/slice"
 printf '0123456789abcdefghijklmnopqrst' > "$test_root/slice/slice.bin"
 printf 'file-backed response payload\n' > "$test_root/slice/local-file"
@@ -55,6 +56,7 @@ http {
     ram_cache_ttl 10;
     ram_cache_purge_token 0123456789abcdef0123456789abcdef;
     proxy_cache_path $test_root/disk levels=1:2 keys_zone=disk:4m;
+    proxy_cache_path $test_root/disk-fail levels=1:2 keys_zone=disk_fail:2m;
     log_format origin '\$uri \$http_range';
     server {
         listen 127.0.0.1:$port_origin;
@@ -105,6 +107,13 @@ http {
             add_header X-Worker \$pid always;
             proxy_pass http://127.0.0.1:$port_origin/slow-origin.bin;
         }
+        location = /l2-write-fail {
+            ram_cache on;
+            proxy_cache disk_fail;
+            proxy_cache_key \$uri;
+            proxy_cache_valid 200 1m;
+            proxy_pass http://127.0.0.1:$port_origin/l2/;
+        }
         location = /slice.bin {
             ram_cache on;
             slice 4;
@@ -148,6 +157,7 @@ EOF
 
 "$nginx_bin" -t -p "$test_root/" -c nginx.conf
 "$nginx_bin" -p "$test_root/" -c nginx.conf
+chmod 500 "$test_root/disk-fail"
 curl --noproxy '*' --fail --silent -D "$test_root/miss.h" \
     "http://127.0.0.1:$port_proxy/object" -o "$test_root/miss.body"
 curl --noproxy '*' --fail --silent -D "$test_root/hit.h" \
@@ -155,6 +165,22 @@ curl --noproxy '*' --fail --silent -D "$test_root/hit.h" \
 cmp "$test_root/miss.body" "$test_root/hit.body"
 rg -qi '^X-RAM-Cache: HIT' "$test_root/hit.h"
 rg -qi '^X-RAM-Cache-Status: L1_HIT' "$test_root/hit.h"
+
+# A failed L2 cache-file install must not publish an L1 object. The origin
+# response remains available, but every request must continue to miss L1.
+printf 'origin payload\n' > "$test_root/expected-l2-write-fail.body"
+for attempt in first second; do
+    curl --noproxy '*' --fail --silent -D "$test_root/l2-write-fail-$attempt.h" \
+        "http://127.0.0.1:$port_proxy/l2-write-fail" \
+        -o "$test_root/l2-write-fail-$attempt.body"
+    cmp "$test_root/l2-write-fail-$attempt.body" \
+        "$test_root/expected-l2-write-fail.body"
+    if rg -qi '^X-RAM-Cache: HIT' "$test_root/l2-write-fail-$attempt.h"; then
+        echo "response with failed L2 persistence unexpectedly hit L1" >&2
+        exit 1
+    fi
+done
+chmod 700 "$test_root/disk-fail"
 
 curl --noproxy '*' --fail --silent -D "$test_root/file-miss.h" \
     "http://127.0.0.1:$port_proxy/local-file" -o "$test_root/file-miss.body"

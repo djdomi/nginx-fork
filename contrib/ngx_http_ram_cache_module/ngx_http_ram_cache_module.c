@@ -91,6 +91,7 @@ typedef struct {
 } ngx_http_ram_cache_loc_conf_t;
 
 typedef struct {
+    ngx_http_request_t *r;
     ngx_str_t    key;
     ngx_str_t    content_type;
     ngx_str_t    etag;
@@ -107,6 +108,7 @@ typedef struct {
     ngx_uint_t   hit:1;
     ngx_uint_t   admit:1;
     ngx_uint_t   reserved:1;
+    ngx_uint_t   complete:1;
     ngx_http_ram_cache_capture_t *capture;
 } ngx_http_ram_cache_ctx_t;
 
@@ -133,6 +135,8 @@ static ngx_int_t ram_cache_is_slice_subrequest(ngx_http_request_t *r);
 static ngx_http_variable_value_t *ram_cache_slice_range(ngx_http_request_t *r);
 static void ram_cache_unpin(void *data);
 static void ram_cache_release_capture(void *data);
+static void ram_cache_finalize_capture(void *data);
+static void ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx);
 static void ram_cache_reap_captures_locked(void);
 static ngx_int_t ram_cache_cacheable(ngx_http_request_t *r);
 static ngx_int_t ram_cache_request_allowed(ngx_http_request_t *r,
@@ -1044,12 +1048,13 @@ ram_cache_header_filter(ngx_http_request_t *r)
             ctx->reserved_bytes = reserve;
             ngx_pool_cleanup_t *cleanup = ngx_pool_cleanup_add(r->pool, 0);
             if (cleanup != NULL) {
-                cleanup->handler = ram_cache_release_capture;
+                cleanup->handler = ram_cache_finalize_capture;
                 cleanup->data = ctx;
             }
             ctx->body = ngx_pnalloc(r->pool, reserve);
             if (cleanup != NULL && ctx->body != NULL
                 && ram_cache_make_key(r, &ctx->key) == NGX_OK) {
+                ctx->r = r;
                 ctx->admit = 1;
                 ctx->expected_len = reserve;
                 ctx->generation = ram_cache_conf->sh->generation;
@@ -1119,16 +1124,14 @@ ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
     ngx_http_ram_cache_ctx_t *ctx;
     ngx_chain_t *cl;
-    ngx_http_ram_cache_entry_t *entry;
-    size_t n, entry_alloc, metadata_len, copy_offset, block_len;
-    size_t required, usable;
-    ngx_uint_t i, block_count, complete, allocation_failed;
-    u_char *p, **blocks;
+    size_t n;
+    ngx_uint_t complete;
 
     if (r != r->main && !ram_cache_is_slice_subrequest(r))
         return ram_cache_next_body_filter(r, in);
     ctx = ngx_http_get_module_ctx(r, ngx_http_ram_cache_module);
-    if (ctx == NULL || !ctx->admit) return ram_cache_next_body_filter(r, in);
+    if (ctx == NULL || !ctx->admit || ctx->complete)
+        return ram_cache_next_body_filter(r, in);
 
     complete = 0;
     for (cl = in; cl != NULL; cl = cl->next) {
@@ -1139,7 +1142,8 @@ ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
         n = cl->buf->last - cl->buf->pos;
         if (ctx->len > ctx->reserved_bytes
-            || n > ctx->reserved_bytes - ctx->len) {
+            || n > ctx->reserved_bytes - ctx->len)
+        {
             ctx->admit = 0;
             ram_cache_release_capture(ctx);
             break;
@@ -1152,140 +1156,173 @@ ram_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     }
 
     if (ctx->admit && complete) {
-        if (ctx->len != ctx->expected_len || ctx->len == 0
-            || r->cache == NULL || r->cache->valid_sec <= ngx_time()) {
+        if (ctx->len != ctx->expected_len || ctx->len == 0) {
             ctx->admit = 0;
             ram_cache_release_capture(ctx);
-            return ram_cache_next_body_filter(r, in);
-        }
-        ctx->expires = ngx_min(ctx->expires, r->cache->valid_sec);
-
-        block_count = (ctx->len + RAM_BLOCK_SIZE - 1) / RAM_BLOCK_SIZE;
-        metadata_len = ctx->key.len + ctx->content_type.len + ctx->etag.len
-                       + ctx->last_modified.len + ctx->accept_ranges.len
-                       + ctx->content_range.len;
-        entry_alloc = offsetof(ngx_http_ram_cache_entry_t, data)
-                      + ((metadata_len + sizeof(void *) - 1)
-                         & ~(sizeof(void *) - 1))
-                      + block_count * sizeof(u_char *);
-
-        ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
-        if (ram_cache_find(&ctx->key) != NULL) {
-            ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
-            ctx->admit = 0;
-            ram_cache_release_capture(ctx);
-            return ram_cache_next_body_filter(r, in);
-        }
-
-        entry = NULL;
-        allocation_failed = 0;
-        required = entry_alloc + ctx->len;
-        usable = ram_cache_conf->zone->shm.size * 80 / 100;
-        while (required <= usable
-               && ram_cache_conf->sh->used_bytes > usable - required)
-        {
-            if (ram_cache_evict_one_locked() != NGX_OK) break;
-        }
-
-        if (required <= usable
-            && ram_cache_conf->sh->used_bytes <= usable - required)
-        {
-            for ( ;; ) {
-                entry = ngx_slab_alloc_locked(ram_cache_conf->shpool,
-                                              entry_alloc);
-                if (entry == NULL) {
-                    allocation_failed = 1;
-                    if (ram_cache_evict_one_locked() == NGX_OK) continue;
-                    break;
-                }
-
-                ngx_memzero(entry, entry_alloc);
-                entry->state = RAM_ENTRY_BUILDING;
-                entry->key_len = ctx->key.len;
-                entry->type_len = ctx->content_type.len;
-                entry->etag_len = ctx->etag.len;
-                entry->modified_len = ctx->last_modified.len;
-                entry->ranges_len = ctx->accept_ranges.len;
-                entry->content_range_len = ctx->content_range.len;
-                entry->body_len = ctx->len;
-                entry->block_count = block_count;
-                entry->alloc_bytes = required;
-                entry->status = ctx->response_status;
-                p = ngx_cpymem(entry->data, ctx->key.data, ctx->key.len);
-                p = ngx_cpymem(p, ctx->content_type.data, entry->type_len);
-                if (entry->etag_len) p = ngx_cpymem(p, ctx->etag.data,
-                                                    entry->etag_len);
-                if (entry->modified_len) p = ngx_cpymem(p,
-                    ctx->last_modified.data, entry->modified_len);
-                if (entry->ranges_len) p = ngx_cpymem(p,
-                    ctx->accept_ranges.data, entry->ranges_len);
-                if (entry->content_range_len) p = ngx_cpymem(p,
-                    ctx->content_range.data, entry->content_range_len);
-                blocks = ram_cache_blocks(entry);
-
-                copy_offset = 0;
-                for (i = 0; i < block_count; i++) {
-                    block_len = ngx_min((size_t) RAM_BLOCK_SIZE,
-                                        ctx->len - copy_offset);
-                    blocks[i] = ngx_slab_alloc_locked(ram_cache_conf->shpool,
-                                                       block_len);
-                    if (blocks[i] == NULL) {
-                        allocation_failed = 1;
-                        break;
-                    }
-                    copy_offset += block_len;
-                }
-                if (i == block_count) break;
-
-                ram_cache_free_entry_locked(entry);
-                entry = NULL;
-                if (ram_cache_evict_one_locked() != NGX_OK) break;
-            }
-        }
-        if (entry == NULL) {
-            ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
-            (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->rejected, 1);
-            if (allocation_failed) {
-                (void) ngx_atomic_fetch_add(
-                    &ram_cache_conf->sh->allocation_failures, 1);
-            }
-            ctx->admit = 0;
-            ram_cache_release_capture(ctx);
-            return ram_cache_next_body_filter(r, in);
-        }
-        blocks = ram_cache_blocks(entry);
-        ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
-
-        copy_offset = 0;
-        for (i = 0; i < block_count; i++) {
-            block_len = ngx_min((size_t) RAM_BLOCK_SIZE,
-                                ctx->len - copy_offset);
-            ngx_memcpy(blocks[i], ctx->body + copy_offset, block_len);
-            copy_offset += block_len;
-        }
-
-        ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
-        if (ram_cache_find(&ctx->key) == NULL
-            && ctx->generation == ram_cache_conf->sh->generation) {
-            entry->state = RAM_ENTRY_READY;
-            entry->expires = ctx->expires;
-            entry->created = ngx_time();
-            entry->accounted = 1;
-            ram_cache_conf->sh->used_bytes += entry->alloc_bytes;
-            (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->objects, 1);
-            ngx_queue_insert_head(&ram_cache_conf->sh->probation,
-                                  &entry->queue);
-            (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->accepted, 1);
         } else {
-            entry->state = RAM_ENTRY_BUILDING;
-            ram_cache_free_entry_locked(entry);
+            ctx->complete = 1;
         }
-        ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
-        ctx->admit = 0;
-        ram_cache_release_capture(ctx);
     }
     return ram_cache_next_body_filter(r, in);
 }
+
+
+static void
+ram_cache_finalize_capture(void *data)
+{
+    ngx_http_ram_cache_ctx_t *ctx = data;
+
+    if (ctx->admit && ctx->complete) {
+        ram_cache_store_capture(ctx);
+    }
+    ram_cache_release_capture(ctx);
+}
+
+
+static void
+ram_cache_store_capture(ngx_http_ram_cache_ctx_t *ctx)
+{
+    ngx_http_request_t *r = ctx->r;
+    ngx_http_ram_cache_entry_t *entry;
+    size_t entry_alloc, metadata_len, copy_offset, block_len;
+    size_t required, usable;
+    ngx_uint_t i, block_count, allocation_failed;
+    u_char *p, **blocks;
+
+    if (r->cache == NULL || r->cache->node == NULL
+        || !r->cache->node->exists || r->cache->valid_sec <= ngx_time())
+    {
+        ctx->admit = 0;
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->rejected, 1);
+        return;
+    }
+    ctx->expires = ngx_min(ctx->expires, r->cache->valid_sec);
+
+    block_count = (ctx->len + RAM_BLOCK_SIZE - 1) / RAM_BLOCK_SIZE;
+    metadata_len = ctx->key.len + ctx->content_type.len + ctx->etag.len
+                   + ctx->last_modified.len + ctx->accept_ranges.len
+                   + ctx->content_range.len;
+    entry_alloc = offsetof(ngx_http_ram_cache_entry_t, data)
+                  + ((metadata_len + sizeof(void *) - 1)
+                     & ~(sizeof(void *) - 1))
+                  + block_count * sizeof(u_char *);
+
+    ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
+    if (ram_cache_find(&ctx->key) != NULL) {
+        ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
+        ctx->admit = 0;
+        return;
+    }
+
+    entry = NULL;
+    allocation_failed = 0;
+    required = entry_alloc + ctx->len;
+    usable = ram_cache_conf->zone->shm.size * 80 / 100;
+    while (required <= usable
+           && ram_cache_conf->sh->used_bytes > usable - required)
+    {
+        if (ram_cache_evict_one_locked() != NGX_OK) break;
+    }
+
+    if (required <= usable
+        && ram_cache_conf->sh->used_bytes <= usable - required)
+    {
+        for ( ;; ) {
+            entry = ngx_slab_alloc_locked(ram_cache_conf->shpool, entry_alloc);
+            if (entry == NULL) {
+                allocation_failed = 1;
+                if (ram_cache_evict_one_locked() == NGX_OK) continue;
+                break;
+            }
+
+            ngx_memzero(entry, entry_alloc);
+            entry->state = RAM_ENTRY_BUILDING;
+            entry->key_len = ctx->key.len;
+            entry->type_len = ctx->content_type.len;
+            entry->etag_len = ctx->etag.len;
+            entry->modified_len = ctx->last_modified.len;
+            entry->ranges_len = ctx->accept_ranges.len;
+            entry->content_range_len = ctx->content_range.len;
+            entry->body_len = ctx->len;
+            entry->block_count = block_count;
+            entry->alloc_bytes = required;
+            entry->status = ctx->response_status;
+            p = ngx_cpymem(entry->data, ctx->key.data, ctx->key.len);
+            p = ngx_cpymem(p, ctx->content_type.data, entry->type_len);
+            if (entry->etag_len)
+                p = ngx_cpymem(p, ctx->etag.data, entry->etag_len);
+            if (entry->modified_len)
+                p = ngx_cpymem(p, ctx->last_modified.data,
+                               entry->modified_len);
+            if (entry->ranges_len)
+                p = ngx_cpymem(p, ctx->accept_ranges.data,
+                               entry->ranges_len);
+            if (entry->content_range_len)
+                p = ngx_cpymem(p, ctx->content_range.data,
+                               entry->content_range_len);
+            blocks = ram_cache_blocks(entry);
+
+            copy_offset = 0;
+            for (i = 0; i < block_count; i++) {
+                block_len = ngx_min((size_t) RAM_BLOCK_SIZE,
+                                    ctx->len - copy_offset);
+                blocks[i] = ngx_slab_alloc_locked(ram_cache_conf->shpool,
+                                                   block_len);
+                if (blocks[i] == NULL) {
+                    allocation_failed = 1;
+                    break;
+                }
+                copy_offset += block_len;
+            }
+            if (i == block_count) break;
+
+            ram_cache_free_entry_locked(entry);
+            entry = NULL;
+            if (ram_cache_evict_one_locked() != NGX_OK) break;
+        }
+    }
+
+    if (entry == NULL) {
+        ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->rejected, 1);
+        if (allocation_failed) {
+            (void) ngx_atomic_fetch_add(
+                &ram_cache_conf->sh->allocation_failures, 1);
+        }
+        ctx->admit = 0;
+        return;
+    }
+    blocks = ram_cache_blocks(entry);
+    ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
+
+    copy_offset = 0;
+    for (i = 0; i < block_count; i++) {
+        block_len = ngx_min((size_t) RAM_BLOCK_SIZE,
+                            ctx->len - copy_offset);
+        ngx_memcpy(blocks[i], ctx->body + copy_offset, block_len);
+        copy_offset += block_len;
+    }
+
+    ngx_shmtx_lock(&ram_cache_conf->shpool->mutex);
+    if (ram_cache_find(&ctx->key) == NULL
+        && ctx->generation == ram_cache_conf->sh->generation
+        && r->cache->node->exists && r->cache->valid_sec > ngx_time())
+    {
+        entry->state = RAM_ENTRY_READY;
+        entry->expires = ctx->expires;
+        entry->created = ngx_time();
+        entry->accounted = 1;
+        ram_cache_conf->sh->used_bytes += entry->alloc_bytes;
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->objects, 1);
+        ngx_queue_insert_head(&ram_cache_conf->sh->probation, &entry->queue);
+        (void) ngx_atomic_fetch_add(&ram_cache_conf->sh->accepted, 1);
+    } else {
+        entry->state = RAM_ENTRY_BUILDING;
+        ram_cache_free_entry_locked(entry);
+    }
+    ngx_shmtx_unlock(&ram_cache_conf->shpool->mutex);
+}
+
 
 static void
 ram_cache_unpin(void *data)

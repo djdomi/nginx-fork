@@ -48,8 +48,10 @@ http {
 and allocator overhead. `ram_cache_max_object` cannot exceed 8 MiB. Up to 10%
 of the zone is reserved for in-progress response capture. Captures are limited
 to 64 KiB slabs and published only after the complete body is validated.
-The default TTL is 300 seconds. Admission requires a live NGINX cache entry;
-L1 expiry is capped by both `ram_cache_ttl` and the L2 `valid_sec`. The L1 zone
+The default TTL is 300 seconds. Admission requires a live, successfully
+installed NGINX cache entry; response capture is published only during request
+cleanup after NGINX completes its cache-file update. L1 expiry is capped by
+both `ram_cache_ttl` and the L2 `valid_sec`. The L1 zone
 is shared by workers and survives a compatible NGINX reload; a full process
 restart starts empty.
 
@@ -146,8 +148,10 @@ hits, bypasses, and metrics. Worker-death recovery also checks that stale
 in-progress capture reservations are reclaimed and their counters return to
 zero. Reclamation occurs on a later eligible response. Its stress job runs
 five 120-request rounds with distinct keys against the same 16 MiB zone. The
-GitHub workflow also runs the complete worker/client matrix, AddressSanitizer
-with leak detection, and ThreadSanitizer.
+suite also makes the L2 cache directory unwritable and verifies that origin
+responses still reach the client without becoming L1 hits. The GitHub workflow
+runs the complete worker/client matrix, AddressSanitizer with leak detection,
+and ThreadSanitizer.
 Tests that have not been implemented are listed in `STATUS.md`.
 
 Set `RAM_CACHE_WORKERS` and `RAM_CACHE_PARALLEL_CLIENTS` to change the live

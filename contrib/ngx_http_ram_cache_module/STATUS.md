@@ -81,6 +81,8 @@ The test executes the real NGINX binary with two workers and verifies:
   origin requests. Standard multipart-206 behavior is not provided by this
   `slice` configuration.
 - L2 disk-cache hit followed by L1 promotion, including file-backed output.
+- An unwritable L2 cache directory preserves the byte-correct origin response
+  but must not publish that response as an L1 hit.
 - Targeted and full L1 PURGE, wrong-token rejection, preservation of L2, and
   repromotion from L2.
 - Responses above the configured object cap, with `Cache-Control: no-store`,
@@ -133,6 +135,10 @@ LeakSanitizer enabled, ThreadSanitizer, and the expanded concurrent stress
 job. The stress job issued five rounds of 120 distinct-key requests; the
 ThreadSanitizer job issued two rounds. Both sanitizer and stress jobs passed
 with the expanded failure and recovery cases enabled.
+
+Capture publication now runs from request cleanup and requires NGINX's cache
+node to report a successfully installed cache file. The unwritable-L2 test
+exercises this condition. The run for this change is pending.
 
 The full integration suite also passed against an AddressSanitizer-instrumented
 NGINX and module build. The build used GCC `-fsanitize=address`; the run used
