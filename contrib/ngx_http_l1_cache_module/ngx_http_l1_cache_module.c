@@ -216,7 +216,6 @@ static ngx_int_t l1_cache_purge_request(ngx_http_request_t *r,
     ngx_str_t *key, ngx_str_t *token);
 static void l1_cache_invalidate(ngx_str_t *key);
 static ngx_int_t l1_cache_handler(ngx_http_request_t *r);
-static void l1_cache_force_ignore_conditionals(ngx_http_request_t *r);
 static ngx_int_t l1_cache_core_handler(ngx_http_request_t *r,
     ngx_http_l1_cache_event_e event, ngx_str_t *key, time_t valid_sec);
 static ngx_int_t l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key);
@@ -1188,9 +1187,6 @@ l1_cache_handler(ngx_http_request_t *r)
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
     r->l1_cache_force = lcf->enabled && lcf->force;
     r->l1_cache_ttl = r->l1_cache_force ? l1_cache_conf->ttl : 0;
-    if (r->l1_cache_force) {
-        l1_cache_force_ignore_conditionals(r->main);
-    }
     if (!r->l1_cache_force) {
         l1_cache_request_cache_policy(r);
     }
@@ -1223,50 +1219,6 @@ l1_cache_handler(ngx_http_request_t *r)
     }
 
     return NGX_DECLINED;
-}
-
-
-/* What: Removes request validators when explicit force mode is enabled.
- * Why: Force mode deliberately ignores conditional HTTP cache semantics for
- *      L1/L2 reuse and must not forward validators to the origin.
- */
-static void
-l1_cache_force_ignore_conditionals(ngx_http_request_t *r)
-{
-    ngx_list_part_t  *part;
-    ngx_table_elt_t  *h;
-    ngx_uint_t        i;
-
-    part = &r->headers_in.headers.part;
-    h = part->elts;
-
-    for ( ;; ) {
-        for (i = 0; i < part->nelts; i++) {
-            if (h[i].hash == 0) {
-                continue;
-            }
-
-            if (L1_HEADER(h[i], "If-Match")
-                || L1_HEADER(h[i], "If-None-Match")
-                || L1_HEADER(h[i], "If-Modified-Since")
-                || L1_HEADER(h[i], "If-Unmodified-Since"))
-            {
-                h[i].hash = 0;
-            }
-        }
-
-        if (part->next == NULL) {
-            break;
-        }
-
-        part = part->next;
-        h = part->elts;
-    }
-
-    r->headers_in.if_match = NULL;
-    r->headers_in.if_none_match = NULL;
-    r->headers_in.if_modified_since = NULL;
-    r->headers_in.if_unmodified_since = NULL;
 }
 
 

@@ -147,12 +147,12 @@ by `Connection` are removed by NGINX before forwarding, disk-cache storage, or
 L1 admission. During an active HTTP/1.1 protocol upgrade, NGINX preserves the
 `Upgrade` response field for its tunnel handshake and creates the downstream
 `Connection: upgrade` field itself.
-Force mode removes `If-Match`, `If-None-Match`, `If-Modified-Since`, and
-`If-Unmodified-Since` before cache and origin processing, and disables
-NGINX's conditional response filter for that request. These four preconditions
-are therefore ignored deliberately. `Range` and `If-Range` retain their
-normal NGINX semantics; non-Slice ranges, unsupported encodings, incomplete
-responses, unvalidated Slice data, and size-limit failures still bypass L1.
+Force mode does not remove client conditional headers. Conditional requests
+bypass L1 and continue through NGINX's normal conditional-response processing,
+which can return 304 or 412 as required by the request validators. `Range` and
+`If-Range` retain their normal NGINX semantics; non-Slice ranges, unsupported
+encodings, incomplete responses, unvalidated Slice data, and size-limit
+failures still bypass L1.
 Configure force mode only for resources whose shared reuse and stored cookies
 are intentional.
 Other module options are
