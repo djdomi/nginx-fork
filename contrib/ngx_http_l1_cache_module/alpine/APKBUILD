@@ -1,0 +1,84 @@
+# Alpine package for the NGINX shared-memory L1 module.
+pkgname=nginx-mod-l1-cache
+_nginx_pkgver=${NGINX_PKGVER:-$(awk '$0 == "P:nginx" { p=1 } p && /^V:/ { sub(/^V:/, ""); print; exit }' /lib/apk/db/installed)}
+if [ -z "$_nginx_pkgver" ]; then
+	die "Set NGINX_PKGVER to the installed nginx package version."
+fi
+pkgver=${_nginx_pkgver%-r*}
+pkgrel=${NGINX_MOD_PKGREL:-1}
+pkgdesc="Shared-memory L1 response cache module for NGINX"
+url="https://github.com/djdomi/nginx-fork"
+arch="x86_64"
+license="BSD-2-Clause"
+depends="nginx=$_nginx_pkgver nginx-mod-http-cache-purge=$_nginx_pkgver"
+makedepends="nginx-mod-dev=$_nginx_pkgver"
+source="50_l1_cache.conf"
+
+build() {
+	local nginx_source="/usr/src/nginx-$pkgver"
+	local module_source="$srcdir/ngx_http_l1_cache_module"
+
+	[ -f "$nginx_source/configure" ] || die "nginx-mod-dev source is missing"
+	mkdir -p "$module_source"
+	mkdir -p "$srcdir/nginx"
+	cp "$startdir/../ngx_http_l1_cache_module.c" \
+		"$module_source/ngx_http_l1_cache_module.c"
+	cp "$startdir/../config" "$module_source/config"
+	cp -R "$nginx_source/." "$srcdir/nginx/"
+	cd "$srcdir/nginx"
+	./configure \
+		--prefix=/var/lib/nginx \
+		--with-compat \
+		--with-threads \
+		--with-http_ssl_module \
+		--with-http_slice_module \
+		--add-dynamic-module="$module_source"
+	make modules
+}
+
+check() {
+	local testdir="$srcdir/module-check"
+	mkdir -p "$testdir/client" "$testdir/proxy" "$testdir/fastcgi" \
+		"$testdir/uwsgi" "$testdir/scgi" "$testdir/cache" "$testdir/logs"
+	cat > "$testdir/nginx.conf" <<EOF
+load_module $srcdir/nginx/objs/ngx_http_l1_cache_module.so;
+pid $testdir/nginx.pid;
+error_log $testdir/logs/error.log;
+events { worker_connections 32; }
+http {
+    aio threads;
+    client_body_temp_path $testdir/client;
+    proxy_temp_path $testdir/proxy;
+    fastcgi_temp_path $testdir/fastcgi;
+    uwsgi_temp_path $testdir/uwsgi;
+    scgi_temp_path $testdir/scgi;
+    l1_cache_zone test 16m;
+    l1_cache_key_id package-check;
+    l1_cache_l2_zone disk;
+    l1_cache_key "\$scheme\$proxy_host\$uri\$is_args\$args\$slice_range";
+    proxy_cache_path $testdir/cache keys_zone=disk:4m;
+    server {
+        listen 127.0.0.1:19999;
+        location / {
+            l1_cache on;
+            proxy_cache \$l1_cache_l2_zone;
+            proxy_cache_key \$l1_cache_key;
+        }
+    }
+}
+EOF
+	nginx -t -c "$testdir/nginx.conf" -p "$testdir/"
+}
+
+package() {
+	install -Dm755 "$srcdir/nginx/objs/ngx_http_l1_cache_module.so" \
+		"$pkgdir/usr/lib/nginx/modules/ngx_http_l1_cache_module.so"
+	install -Dm644 "$srcdir/50_l1_cache.conf" \
+		"$pkgdir/etc/nginx/modules/50_l1_cache.conf"
+	install -Dm644 "$startdir/../README.md" \
+		"$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+
+sha512sums="
+eb938fe18cddf72eadbcf96bea890b115828f20baac32468a19efb6f15d5758e31a66c43a1f93ec45a758a256b397e0df97465d2bed7e826fa2b292a4c1b2d97  50_l1_cache.conf
+"

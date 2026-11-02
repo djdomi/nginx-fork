@@ -20,6 +20,27 @@ make -j4 modules
 The resulting module must be loaded by an ABI-compatible NGINX binary. Verify
 it with `nginx -t` and real requests before deployment. Slice support is a build
 requirement because the module detects slice subrequests and uses `$slice_range`.
+The module reads NGINX's private `ngx_http_cache_t` and upstream cache-status
+fields to validate native L2 publication. Those structures are not a stable
+public ABI; the Alpine APK therefore depends on the exact matching NGINX
+package version and is built from that version's `nginx-mod-dev` source.
+
+## Alpine APK
+
+The package recipe derives its NGINX version from `NGINX_PKGVER` or the
+installed `nginx` package. In a package build environment, pass the exact
+version returned by `apk info -a nginx`:
+
+```sh
+NGINX_PKGVER=1.30.6-r0 abuild -r
+sudo apk add --repository=/path/to/repository nginx-mod-l1-cache
+```
+
+The APK pins `nginx` and `nginx-mod-dev` to that package version, installs the
+module under `/usr/lib/nginx/modules`, and adds an autoload file under
+`/etc/nginx/modules`. Its matching `nginx-mod-http-cache-purge` dependency
+provides native L2 purge support. The tested target in this repository is
+Alpine x86_64 with `nginx-1.30.6-r0`.
 
 ## Configuration
 
@@ -31,6 +52,8 @@ http {
     aio threads;
     l1_cache_zone l1 512m;
     l1_cache_key_id downloads-v1;
+    l1_cache_l2_zone disk;
+    l1_cache_key "$scheme$proxy_host$uri$is_args$args$slice_range";
     l1_cache_max_object 8m;
     l1_cache_ttl 300;
 
@@ -39,9 +62,13 @@ http {
         location /downloads/ {
             l1_cache on;
             l1_cache_force off;
-            proxy_cache disk;
+            proxy_cache $l1_cache_l2_zone;
+            proxy_cache_key $l1_cache_key;
+            proxy_cache_bypass $l1_cache_request_bypass;
+            proxy_no_cache $l1_cache_request_no_store;
             proxy_cache_lock on;
             proxy_cache_valid 200 206 10m;
+            proxy_cache_purge PURGE from 127.0.0.1;
             proxy_pass http://origin;
         }
     }
@@ -70,12 +97,35 @@ shared memory; a changed value advances the generation, cancels in-progress
 captures, and invalidates old objects before new workers use the zone.
 
 Set `l1_cache_key_id` in `http` scope and change it when the meaning of the
-configured `proxy_cache_key`, origin identity, or Slice policy changes without
-changing the L1 zone layout. The value is compared byte for byte, limited to
-128 bytes, and changing it invalidates L1 entries and cancels old-generation
-fills on reload. Persistent NGINX L2 files remain available for promotion.
-Keep the value stable for ordinary compatible reloads so READY L1 objects
-survive them.
+cache key, origin identity, or Slice policy changes without changing the L1
+zone layout. The value is compared byte for byte, limited to 128 bytes, and
+changing it invalidates L1 entries and cancels old-generation fills on reload.
+Persistent NGINX L2 files remain available for promotion. Keep the value stable
+for ordinary compatible reloads so READY L1 objects survive them.
+
+Every L1-enabled location must set `l1_cache_l2_zone` and `l1_cache_key`.
+Use `proxy_cache $l1_cache_l2_zone` and `proxy_cache_key $l1_cache_key` in
+that same location. `$l1_cache_key` evaluates the configured cache-key
+expression used by both L1 and native L2. L1 additionally scopes the value by
+the zone name and `l1_cache_key_id`. In force mode, the variable appends a
+length-delimited fingerprint of request headers so the explicit override does
+not merge credential or representation variants. Include `$slice_range` in
+the expression when using the native Slice module.
+
+The request-policy variables must be connected to the native proxy directives
+as shown above. They apply request `no-cache`, `no-store`, `Pragma`, and
+credential bypass decisions to L2 as well as L1. The Alpine APK depends on
+Alpine's version-matched `nginx-mod-http-cache-purge`; configure its
+`proxy_cache_purge` directive for authorized PURGE requests. The L1 module
+validates its purge token and invalidates shared-memory objects before handing
+the request to that L2 purge handler. PURGE of `/` invalidates every L1 object;
+the OSS L2 purge module purges the key represented by that request.
+
+`only-if-cached` remains an open limitation for an L2-only hit: stock NGINX
+does not expose a proxy hook that lets this dynamic module observe an L2 miss
+before the native proxy starts an origin request. The module records the
+directive and can serve an L1 hit, but does not claim complete RFC behavior
+for this L2 case.
 
 The default policy is a conservative RFC-oriented subset. It serves complete
 GET 200 responses and validated native Slice 206 segments; HEAD can reuse
@@ -212,21 +262,22 @@ the existing NGINX proxy cache as L2 and its native request path authoritative.
 
 ## Purge
 
-PURGE is handled by the L1 module when a shared zone is configured. Define a
-random secret of at least 32 bytes in `http` scope, protect the NGINX
+Define a random secret of at least 32 bytes in `http` scope, protect the NGINX
 configuration file, and restrict network access to PURGE requests:
 
 ```nginx
 l1_cache_purge_token "replace-with-a-random-secret-of-at-least-32-bytes";
 ```
 
-Send `X-L1-Cache-Purge` with the same secret. `PURGE /` invalidates all entries
-in the selected L1 and NGINX proxy-cache zones; other URIs invalidate the
-matching keys and cancel an in-progress L1 fill. L2 nodes are marked under the
-native cache-zone lock so new requests cannot hit them, and NGINX's cache
-manager removes their files. A fill already in progress cannot republish a
-purged L2 object. Unrelated entries remain usable for targeted PURGE. Both
-forms return 204. An incorrect or missing secret returns 403.
+Configure `proxy_cache_purge` as in the example above and send
+`X-L1-Cache-Purge` with the same secret. The L1 module invalidates matching RAM
+objects and cancels matching L1 captures, then passes the request to Alpine's
+version-matched cache-purge module to invalidate the native L2 key. That
+extension returns HTTP 412 in the tested configuration even when the next
+request confirms an L2 miss; callers must not treat that status as a success
+signal. `PURGE /` invalidates every L1 object, while the L2 extension purges
+only the key represented by `/`; a global L2 purge is not implemented. An
+incorrect or missing L1 secret returns 403.
 
 ## Metrics
 
