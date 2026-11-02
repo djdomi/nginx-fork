@@ -149,6 +149,7 @@ typedef struct {
 typedef struct {
     ngx_flag_t enabled;
     ngx_flag_t force;
+    ngx_flag_t purge_l2;
     ngx_str_t l2_zone;
     ngx_http_complex_value_t *key;
 } ngx_http_l1_cache_loc_conf_t;
@@ -156,6 +157,7 @@ typedef struct {
 typedef struct {
     ngx_http_request_t *r;
     ngx_str_t    key;
+    ngx_str_t    proxy_key;
     ngx_str_t    content_type;
     ngx_str_t    etag;
     ngx_str_t    last_modified;
@@ -196,6 +198,9 @@ typedef struct {
     ngx_uint_t   request_revalidate:1;
     ngx_uint_t   l2_status_seen:1;
     ngx_uint_t   invalidate_after_response:1;
+    ngx_uint_t   purge_l2_after_response:1;
+    ngx_uint_t   internal_l2_purge:1;
+    ngx_uint_t   proxy_key_ready:1;
     ngx_http_l1_cache_capture_t *capture;
 } ngx_http_l1_cache_ctx_t;
 
@@ -235,6 +240,7 @@ static ngx_int_t l1_cache_restore_headers(ngx_http_request_t *r,
     u_char *data, size_t len);
 static ngx_int_t l1_cache_purge_request(ngx_http_request_t *r,
     ngx_str_t *key, ngx_str_t *token);
+static ngx_int_t l1_cache_start_l2_purge(ngx_http_request_t *r);
 static void l1_cache_invalidate(ngx_str_t *key);
 static ngx_int_t l1_cache_handler(ngx_http_request_t *r);
 static ngx_int_t l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key);
@@ -308,6 +314,9 @@ static ngx_command_t l1_cache_commands[] = {
     { ngx_string("l1_cache_force"), NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_l1_cache_loc_conf_t, force), NULL },
+    { ngx_string("l1_cache_l2_purge"), NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_l1_cache_loc_conf_t, purge_l2), NULL },
     { ngx_string("l1_cache_l2_zone"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF
                                       |NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_str_slot, NGX_HTTP_LOC_CONF_OFFSET,
@@ -428,6 +437,58 @@ l1_cache_request_policy_variable(ngx_http_request_t *r,
 }
 
 
+static ngx_int_t
+l1_cache_key_source_safe(ngx_str_t *source)
+{
+    static u_char proxy_host[] = "proxy_host";
+    static u_char proxy_port[] = "proxy_port";
+    static u_char upstream[] = "upstream_";
+    u_char *p, *last, *start;
+    size_t len;
+
+    p = source->data;
+    last = p + source->len;
+
+    while (p < last) {
+        if (*p++ != '$') {
+            continue;
+        }
+
+        if (p < last && *p == '$') {
+            p++;
+            continue;
+        }
+
+        if (p < last && *p == '{') {
+            p++;
+        }
+
+        start = p;
+        while (p < last
+               && ((*p >= 'a' && *p <= 'z')
+                   || (*p >= 'A' && *p <= 'Z')
+                   || (*p >= '0' && *p <= '9') || *p == '_'))
+        {
+            p++;
+        }
+
+        len = p - start;
+        if ((len == sizeof(proxy_host) - 1
+             && ngx_strncasecmp(start, proxy_host, len) == 0)
+            || (len == sizeof(proxy_port) - 1
+                && ngx_strncasecmp(start, proxy_port, len) == 0)
+            || (len >= sizeof(upstream) - 1
+                && ngx_strncasecmp(start, upstream,
+                                   sizeof(upstream) - 1) == 0))
+        {
+            return NGX_DECLINED;
+        }
+    }
+
+    return NGX_OK;
+}
+
+
 static char *
 l1_cache_set_key(ngx_conf_t *cf, ngx_command_t *cmd, void *data)
 {
@@ -436,6 +497,9 @@ l1_cache_set_key(ngx_conf_t *cf, ngx_command_t *cmd, void *data)
     ngx_str_t *value = cf->args->elts;
 
     if (lcf->key != NULL) return "is duplicate";
+    if (l1_cache_key_source_safe(&value[1]) != NGX_OK) {
+        return "l1_cache_key cannot use proxy_host, proxy_port, or upstream variables; use request-available origin identity variables";
+    }
     lcf->key = ngx_pcalloc(cf->pool, sizeof(*lcf->key));
     if (lcf->key == NULL) return NGX_CONF_ERROR;
     ngx_memzero(&ccv, sizeof(ccv));
@@ -475,12 +539,40 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     uintptr_t data)
 {
     ngx_http_l1_cache_loc_conf_t *lcf;
+    ngx_http_l1_cache_ctx_t *ctx, *main_ctx;
     ngx_list_part_t *part;
     ngx_table_elt_t *h;
     ngx_str_t expanded;
     ngx_uint_t i;
     size_t len, n;
     u_char *p;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->internal_l2_purge) {
+        main_ctx = ngx_http_get_module_ctx(r->main,
+                                           ngx_http_l1_cache_module);
+        if (main_ctx == NULL || !main_ctx->proxy_key_ready) {
+            v->not_found = 1;
+            return NGX_OK;
+        }
+        v->data = main_ctx->proxy_key.data;
+        v->len = main_ctx->proxy_key.len;
+        v->valid = 1;
+        v->no_cacheable = 1;
+        v->not_found = 0;
+        v->escape = 0;
+        return NGX_OK;
+    }
+
+    if (ctx != NULL && ctx->proxy_key_ready) {
+        v->data = ctx->proxy_key.data;
+        v->len = ctx->proxy_key.len;
+        v->valid = 1;
+        v->no_cacheable = 1;
+        v->not_found = 0;
+        v->escape = 0;
+        return NGX_OK;
+    }
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
     if (lcf->key == NULL || lcf->l2_zone.len == 0) {
@@ -555,6 +647,11 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     v->no_cacheable = 1;
     v->not_found = 0;
     v->escape = 0;
+    if (ctx != NULL && !ctx->internal_l2_purge) {
+        ctx->proxy_key.data = v->data;
+        ctx->proxy_key.len = v->len;
+        ctx->proxy_key_ready = 1;
+    }
     return NGX_OK;
 }
 
@@ -881,6 +978,7 @@ l1_cache_create_loc_conf(ngx_conf_t *cf)
     if (conf == NULL) return NULL;
     conf->enabled = NGX_CONF_UNSET;
     conf->force = NGX_CONF_UNSET;
+    conf->purge_l2 = NGX_CONF_UNSET;
     return conf;
 }
 
@@ -899,6 +997,7 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->enabled, prev->enabled,
                          mcf != NULL && mcf->zone != NULL);
     ngx_conf_merge_value(conf->force, prev->force, 0);
+    ngx_conf_merge_value(conf->purge_l2, prev->purge_l2, 0);
     if (conf->l2_zone.len == 0) conf->l2_zone = prev->l2_zone;
     if (conf->key == NULL) conf->key = prev->key;
 
@@ -1411,6 +1510,11 @@ l1_cache_handler(ngx_http_request_t *r)
     ngx_int_t slice, rc;
     ngx_str_t key;
 
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->internal_l2_purge) {
+        return NGX_DECLINED;
+    }
+
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
 
     if (l1_cache_conf == NULL || l1_cache_conf->sh == NULL) {
@@ -1463,6 +1567,7 @@ l1_cache_handler(ngx_http_request_t *r)
     if (r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD) {
         if (l1_cache_request_key(r, &ctx->key) == NGX_OK) {
             ctx->invalidate_after_response = 1;
+            ctx->purge_l2_after_response = lcf->purge_l2;
         }
         return NGX_DECLINED;
     }
@@ -1491,6 +1596,40 @@ l1_cache_handler(ngx_http_request_t *r)
         return NGX_HTTP_GATEWAY_TIME_OUT;
     }
     return rc;
+}
+
+
+/* What: Ask the configured native cache-purge handler to invalidate L2.
+ * Why: Stock NGINX exposes no public module API for purging its file cache.
+ */
+static ngx_int_t
+l1_cache_start_l2_purge(ngx_http_request_t *r)
+{
+    static ngx_str_t method = ngx_string("PURGE");
+    ngx_http_request_t *sr;
+    ngx_http_l1_cache_ctx_t *ctx;
+    ngx_str_t uri, args;
+
+    ctx = ngx_pcalloc(r->pool, sizeof(*ctx));
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    uri = r->uri;
+    args = r->args;
+    if (ngx_http_subrequest(r, &uri, &args, &sr, NULL,
+                            NGX_HTTP_SUBREQUEST_BACKGROUND) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    sr->method = NGX_HTTP_UNKNOWN;
+    sr->method_name = method;
+    ctx->r = sr;
+    ctx->internal_l2_purge = 1;
+    ngx_http_set_ctx(sr, ctx, ngx_http_l1_cache_module);
+
+    return NGX_OK;
 }
 
 
@@ -2916,7 +3055,14 @@ l1_cache_header_filter(ngx_http_request_t *r)
         && r->headers_out.status < NGX_HTTP_BAD_REQUEST)
     {
         l1_cache_invalidate(&ctx->key);
+        if (ctx->purge_l2_after_response && r == r->main
+            && l1_cache_start_l2_purge(r) != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                          "l1 cache could not schedule native L2 purge");
+        }
         ctx->invalidate_after_response = 0;
+        ctx->purge_l2_after_response = 0;
     }
 
     if (l1_cache_update_l2_age(r, ctx) != NGX_OK) {

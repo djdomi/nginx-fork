@@ -55,12 +55,13 @@ http {
     l1_cache_zone test 16m;
     l1_cache_key_id package-check;
     l1_cache_l2_zone disk;
-    l1_cache_key "\$scheme\$proxy_host\$uri\$is_args\$args\$slice_range";
+    l1_cache_key "\$scheme\$host\$uri\$is_args\$args\$slice_range";
     proxy_cache_path $testdir/cache keys_zone=disk:4m;
     server {
         listen 127.0.0.1:19999;
         location / {
             l1_cache on;
+            l1_cache_l2_purge on;
             proxy_cache \$l1_cache_l2_zone;
             proxy_cache_key \$l1_cache_key;
         }

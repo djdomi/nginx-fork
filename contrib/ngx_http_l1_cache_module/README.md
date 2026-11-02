@@ -53,7 +53,7 @@ http {
     l1_cache_zone l1 512m;
     l1_cache_key_id downloads-v1;
     l1_cache_l2_zone disk;
-    l1_cache_key "$scheme$proxy_host$uri$is_args$args$slice_range";
+    l1_cache_key "$scheme$host$uri$is_args$args$slice_range";
     l1_cache_max_object 8m;
     l1_cache_ttl 300;
 
@@ -62,6 +62,7 @@ http {
         location /downloads/ {
             l1_cache on;
             l1_cache_force off;
+            l1_cache_l2_purge on;
             proxy_cache $l1_cache_l2_zone;
             proxy_cache_key $l1_cache_key;
             proxy_cache_bypass $l1_cache_request_bypass;
@@ -106,7 +107,12 @@ for ordinary compatible reloads so READY L1 objects survive them.
 Every L1-enabled location must set `l1_cache_l2_zone` and `l1_cache_key`.
 Use `proxy_cache $l1_cache_l2_zone` and `proxy_cache_key $l1_cache_key` in
 that same location. `$l1_cache_key` evaluates the configured cache-key
-expression used by both L1 and native L2. L1 additionally scopes the value by
+expression used by both L1 and native L2. It is evaluated in PRECONTENT,
+before the proxy content handler creates `$proxy_host` and upstream variables,
+so those variables are rejected in the expression. Use request-available
+variables that encode the selected origin, scheme, host, URI, query, and slice
+as needed; for variable-based upstreams, include the request variable that
+selects the origin. L1 additionally scopes the value by
 the zone name and `l1_cache_key_id`. In force mode, the variable appends a
 length-delimited fingerprint of request headers so the explicit override does
 not merge credential or representation variants. Include `$slice_range` in
@@ -152,11 +158,12 @@ interpret these directives. `l1_cache_force on` explicitly overrides it and
 fingerprints request headers to keep credential variants separate.
 
 Successful responses to unsafe methods (2xx or 3xx) invalidate the matching
-L1 entry; failed responses leave it usable. The standalone module cannot call
-the OSS NGINX file-cache invalidation function, so it does not claim that an
-unsafe method also removes the corresponding L2 file. Configure an authorized
-native cache-purge path when immediate L2 invalidation is required; automatic
-L2 invalidation after unsafe methods remains open.
+L1 entry; failed responses leave it usable. Set `l1_cache_l2_purge on` to
+schedule a background internal `PURGE` subrequest to the configured native
+cache-purge handler. This requires `proxy_cache_purge PURGE ...` in the same
+location and preserves the original URI, arguments, and request headers used
+to compute the cache key. The unsafe request's response is still returned to
+the client. Without that setting, only L1 is invalidated.
 
 For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss or
 bypass, the module currently returns 504 before the native proxy can check L2.
