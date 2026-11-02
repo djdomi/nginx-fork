@@ -151,43 +151,42 @@ enforced by the NGINX integration because `proxy_cache_bypass` alone does not
 interpret these directives. `l1_cache_force on` explicitly overrides it and
 fingerprints request headers to keep credential variants separate.
 
-Successful responses to unsafe methods (2xx or 3xx) invalidate cached data;
-failed responses leave existing entries usable. With NGINX's built-in cache
-key, NGINX invalidates the matching L1 and L2 object. With a custom
-`proxy_cache_key`, native Slice segments, or force mode, the module invalidates
-the selected L1 and L2 zones because arbitrary key and variant layouts cannot
-be mapped safely to one object.
+Successful responses to unsafe methods (2xx or 3xx) invalidate the matching
+L1 entry; failed responses leave it usable. The standalone module cannot call
+the OSS NGINX file-cache invalidation function, so it does not claim that an
+unsafe method also removes the corresponding L2 file. Configure an authorized
+native cache-purge path when immediate L2 invalidation is required; automatic
+L2 invalidation after unsafe methods remains open.
 
-The request directive `Cache-Control: only-if-cached` may use a fresh L1 or
-native L2 hit. If neither cache can provide a usable hit, NGINX returns 504
-without contacting the origin. Combinations with other request cache
-directives are conservatively treated as unsatisfied and return 504; a forced
-location deliberately permits the normal origin fallback. Asynchronous L2
-file reads complete through NGINX's normal thread-AIO path before the hit or
-miss decision is made.
+For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss or
+bypass, the module currently returns 504 before the native proxy can check L2.
+It therefore does not support an L2-only hit for this request directive.
+Combinations with other request cache directives are treated as unsatisfied
+and return 504 in normal mode; force mode deliberately allows the configured
+normal proxy path. This L2-only limitation remains open.
 
-On responses, exact `no-store`, `private`, `no-cache`, `must-revalidate`, and
-`proxy-revalidate` Cache-Control directives prevent L2 storage even if
-`proxy_ignore_headers Cache-Control` is configured. The revalidation directives
-are conservatively excluded because native NGINX stale-serving configuration
-can otherwise return them without revalidation. An unterminated quoted
-Cache-Control value also prevents L2 storage. `l1_cache_force on` is the
-explicit override for these protections.
-For non-forced locations, explicitly ignoring Cache-Control, Expires,
-X-Accel-Expires, Set-Cookie, or Vary disables L1/L2 reuse and storage in that
-location. This also avoids serving an older disk entry whose response policy
-cannot be checked before the cache lookup. Use `l1_cache_force on` to opt into
-that override deliberately.
+The module rejects L1 admission for response policies it does not support.
+The native NGINX proxy cache remains the L2 policy owner. Do not set
+`proxy_ignore_headers` for cache-control or representation headers in a normal
+location: that can make L2 ignore restrictions which L1 correctly rejects.
+The module does not yet validate every proxy-level cache-policy override at
+configuration time.
 
 `l1_cache_force on` on a location overrides request and response cache
 directives, including `no-cache`, `private`, and `no-store`, and uses
-`l1_cache_ttl` as the corresponding L2 and L1 validity. It also permits
+the native L2 validity as the upper bound for L1 validity. Set the L2 lifetime
+with NGINX's `proxy_cache_valid`; `l1_cache_ttl` can shorten, but does not
+extend, that lifetime. To make native L2 ignore origin cache-policy headers in
+an explicitly forced location, configure NGINX's `proxy_ignore_headers` for
+the intended headers (for example `Cache-Control Expires X-Accel-Expires
+Set-Cookie Vary`). Do not use those overrides in normal locations. Force mode also permits
 credentialled requests, `Set-Cookie`, and `Vary` responses. To keep these
-variants separate, NGINX adds a digest of request headers to the disk-cache
-key and the full length-delimited header set to the L1 key. The disk-key
-fingerprint uses SHA-256; credential values are not added by this mechanism to
-the persistent cache key. Enabling force mode requires NGINX to be built with
-OpenSSL. L1 stores and
+variants separate, the module appends request-header names and values in
+length-delimited form to the configured key used by both L1 and L2. This
+includes credential values, which NGINX writes into the cache file's key
+metadata. Protect the disk-cache directory accordingly. This implementation
+does not hash or redact those values. Enabling force mode requires NGINX to be
+built with OpenSSL. L1 stores and
 replays `Vary`, `Set-Cookie`, and otherwise unsupported end-to-end response
 fields, preserving repeated fields in their original order within a 4 KiB
 metadata limit. NGINX processes named `Vary` fields natively; `Vary: *` uses the
@@ -216,19 +215,16 @@ responses itself; NGINX's slice and range filters retain that responsibility.
 If a Slice-enabled request receives a full `200` instead of a validated `206`,
 NGINX keeps its native fallback response and the module refuses L1 admission;
 the first slice key must not identify a full object.
-In the default mode, non-Slice ranges and conditional requests bypass L1. The
-four conditional validators listed above are ignored in force mode; `Range`
-and `If-Range` are not. The L1 key is the
-byte-for-byte concatenation of the actual NGINX `r->cache->keys` fields
-generated by the configured `proxy_cache_key`, namespaced by the effective
-NGINX proxy-cache zone. The zone namespace matters because two independent L2
-zones may safely use identical key bytes for different origins or policies.
-The hash is only an index and full key bytes are compared on lookup. L1 does
-not invent a second URL normalization rule. Within each zone, the L2 key
-therefore remains the identity authority: include scheme, host/origin, query,
-and `$slice_range` as required by the deployment's L2 policy. In force mode,
-the request-header variant is appended to both cache identities before the
-native disk-cache lookup.
+In the default mode, non-Slice ranges and conditional requests bypass L1. In
+force mode, conditional validators are preserved and the module bypasses L1 so
+NGINX handles them normally; `Range` and `If-Range` retain their normal NGINX
+semantics. The configured `l1_cache_key` expression is the identity input for
+both L1 and native L2, and must also be used as `proxy_cache_key`. L1 adds the
+configured zone name and `l1_cache_key_id` to its own key. The module cannot
+verify that a location actually applies this expression to `proxy_cache_key`;
+a mismatched configuration can return incorrect objects and is unsupported.
+Include scheme, origin, query, and `$slice_range` as required by the cache
+policy. Full key bytes are compared after the tree-hash lookup.
 
 ## Squid reference
 
