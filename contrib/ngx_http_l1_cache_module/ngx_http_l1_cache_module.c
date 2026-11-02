@@ -2331,10 +2331,10 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
     ngx_array_t extra_headers;
     ngx_uint_t i, date_seen, server_seen, control_seen, expires_seen;
     ngx_uint_t encoding_seen, age_seen, age_valid, age_digits, j;
-    uint64_t age_value, max_age;
-    time_t date, now;
+    uint64_t age_value, corrected_age_value, max_age;
+    time_t date, now, apparent_age;
     uint64_t response_delay;
-    ngx_msec_t elapsed;
+    uint64_t delay_seconds;
     size_t metadata_len, extra_len;
     u_char *p, *age_end;
 
@@ -2345,6 +2345,7 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
     encoding_seen = 0;
     age_seen = 0;
     age_value = 0;
+    date = (time_t) NGX_ERROR;
     max_age = (uint64_t) NGX_MAX_INT_T_VALUE;
     metadata_len = 0;
     extra_len = 0;
@@ -2404,10 +2405,6 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
                     return NGX_DECLINED;
                 }
                 ctx->date = h[i].value;
-                if (date < now && now - date > ctx->initial_age) {
-                    ctx->initial_age = now - date;
-                }
-
             } else if (L1_HEADER(h[i], "Age")) {
                 if (age_seen++) {
                     continue;
@@ -2440,8 +2437,8 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
                     age_valid = 0;
                 }
 
-                if (age_valid && (time_t) age_value > ctx->initial_age) {
-                    ctx->initial_age = (time_t) age_value;
+                if (!age_valid) {
+                    age_value = 0;
                 }
 
             } else if (L1_HEADER(h[i], "Server")) {
@@ -2534,27 +2531,36 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
         }
     }
 
-    if (ctx->initial_age < 0) {
-        ctx->initial_age = 0;
-    }
-
     ctx->response_time = ngx_time();
     ctx->response_msec = ngx_current_msec;
-    if (!ctx->l2_hit) {
-        elapsed = ctx->response_msec - r->start_monotonic_msec;
-        response_delay = elapsed / 1000;
-        if (elapsed % 1000 != 0) {
-            response_delay++;
-        }
 
-        if (response_delay
-            > (uint64_t) (NGX_MAX_INT_T_VALUE - ctx->initial_age))
+    /* What: Calculate RFC 9111 corrected initial age. */
+    /* Why: Delay applies to Age, never apparent age or L2. */
+    response_delay = 0;
+    if (!ctx->l2_hit) {
+        if (r->upstream != NULL && r->upstream->state != NULL
+            && r->upstream->state->header_time != (ngx_msec_t) -1)
         {
-            ctx->initial_age = NGX_MAX_INT_T_VALUE;
-        } else {
-            ctx->initial_age += (time_t) response_delay;
+            response_delay = r->upstream->state->header_time;
         }
     }
+
+    delay_seconds = response_delay / 1000;
+    if (response_delay % 1000 != 0) {
+        delay_seconds++;
+    }
+
+    corrected_age_value = delay_seconds > max_age - age_value
+                          ? max_age : age_value + delay_seconds;
+
+    apparent_age = date != (time_t) NGX_ERROR && date < now
+                   ? now - date : 0;
+
+    if (apparent_age < 0) {
+        apparent_age = 0;
+    }
+
+    ctx->initial_age = ngx_max(apparent_age, (time_t) corrected_age_value);
 
     return NGX_OK;
 }
