@@ -268,12 +268,24 @@ l1_cache_purge_token "replace-with-a-random-secret-of-at-least-32-bytes";
 Configure `proxy_cache_purge` as in the example above and send
 `X-L1-Cache-Purge` with the same secret. The L1 module invalidates matching RAM
 objects and cancels matching L1 captures, then passes the request to Alpine's
-version-matched cache-purge module to invalidate the native L2 key. That
-extension returns HTTP 412 in the tested configuration even when the next
-request confirms an L2 miss; callers must not treat that status as a success
-signal. `PURGE /` invalidates every L1 object, while the L2 extension purges
-only the key represented by `/`; a global L2 purge is not implemented. An
-incorrect or missing L1 secret returns 403.
+version-matched cache-purge module to invalidate L2. For a full-zone purge,
+configure the exact root location with the add-on's `purge_all` option:
+
+```nginx
+location = / {
+    l1_cache on;
+    proxy_cache $l1_cache_l2_zone;
+    proxy_cache_key $l1_cache_key;
+    proxy_cache_purge PURGE purge_all from 127.0.0.1;
+    proxy_pass http://origin;
+}
+```
+
+This is an administrative full-zone operation: restrict it to a trusted
+network and require the L1 purge token. Other PURGE URIs use exact-key L2
+purging. The add-on's response status is not used by the L1 module as proof of
+L2 persistence. An incorrect or missing L1 secret returns 403 before the
+add-on runs.
 
 ## Metrics
 
