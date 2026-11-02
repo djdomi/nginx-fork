@@ -161,13 +161,32 @@ ngx_http_slice_header_filter(ngx_http_request_t *r)
 
     slcf = ngx_http_get_module_loc_conf(r, ngx_http_slice_filter_module);
 
-    end = ngx_min(cr.start + (off_t) slcf->size, cr.complete_length);
+    if (cr.start >= cr.complete_length) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "invalid start in slice response");
+        return NGX_ERROR;
+    }
+
+    end = cr.start
+          + ngx_min((off_t) slcf->size, cr.complete_length - cr.start);
 
     if (cr.start != ctx->start || cr.end != end) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "unexpected range in slice response: %O-%O, "
                       "expected: %O-%O", cr.start, cr.end, ctx->start, end);
         return NGX_ERROR;
+    }
+
+    r->l1_cache_slice_response = 1;
+    r->l1_cache_slice_start = cr.start;
+    r->l1_cache_slice_end = cr.end;
+    r->l1_cache_slice_complete = cr.complete_length;
+    r->headers_out.content_offset = cr.start;
+
+    if (r->l1_cache_handler != NULL) {
+        (void) r->l1_cache_handler(r,
+                                   NGX_HTTP_L1_CACHE_SLICE_HEADERS,
+                                   NULL, 0);
     }
 
     ctx->start = end;
@@ -293,14 +312,48 @@ ngx_http_slice_parse_content_range(ngx_http_request_t *r,
 {
     off_t             start, end, complete_length, cutoff, cutlim;
     u_char           *p;
-    ngx_table_elt_t  *h;
+    ngx_uint_t        i, content_range_count;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h, *header;
 
     h = r->headers_out.content_range;
 
     if (h == NULL
         || h->value.len < 7
-        || ngx_strncmp(h->value.data, "bytes ", 6) != 0)
+        || ngx_strncasecmp(h->value.data, (u_char *) "bytes ", 6) != 0)
     {
+        return NGX_ERROR;
+    }
+
+    content_range_count = 0;
+    part = &r->headers_out.headers.part;
+    header = part->elts;
+
+    for ( ;; ) {
+        for (i = 0; i < part->nelts; i++) {
+            if (header[i].hash == 0
+                || header[i].key.len != sizeof("Content-Range") - 1
+                || ngx_strncasecmp(header[i].key.data,
+                                   (u_char *) "Content-Range",
+                                   sizeof("Content-Range") - 1) != 0)
+            {
+                continue;
+            }
+
+            if (++content_range_count > 1) {
+                return NGX_ERROR;
+            }
+        }
+
+        if (part->next == NULL) {
+            break;
+        }
+
+        part = part->next;
+        header = part->elts;
+    }
+
+    if (content_range_count != 1) {
         return NGX_ERROR;
     }
 
@@ -345,6 +398,10 @@ ngx_http_slice_parse_content_range(ngx_http_request_t *r,
         }
 
         end = end * 10 + (*p++ - '0');
+    }
+
+    if (end == NGX_MAX_OFF_T_VALUE) {
+        return NGX_ERROR;
     }
 
     end++;
@@ -443,6 +500,11 @@ ngx_http_slice_range_variable(ngx_http_request_t *r,
     v->not_found = 0;
     v->no_cacheable = 1;
     v->len = ctx->range.len;
+    /*
+     * What: Mark requests that use the native Slice module.
+     * Why: A later 200 response loses the Slice context.
+     */
+    r->l1_cache_slice_enabled = 1;
 
     return NGX_OK;
 }

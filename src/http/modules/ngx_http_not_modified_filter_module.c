@@ -56,7 +56,8 @@ ngx_http_not_modified_header_filter(ngx_http_request_t *r)
 {
     if (r->headers_out.status != NGX_HTTP_OK
         || r != r->main
-        || r->disable_not_modified)
+        || r->disable_not_modified
+        || r->l1_cache_force)
     {
         return ngx_http_next_header_filter(r);
     }

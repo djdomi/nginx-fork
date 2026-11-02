@@ -2539,6 +2539,12 @@ ngx_http_subrequest(ngx_http_request_t *r,
 
     sr->main = r->main;
     sr->parent = r;
+    sr->l1_cache_handler = r->l1_cache_handler;
+    sr->l1_cache_ttl = r->l1_cache_ttl;
+    sr->l1_cache_key_extra = r->l1_cache_key_extra;
+    sr->l1_cache_force = r->l1_cache_force;
+    sr->l1_cache_request_bypass = r->l1_cache_request_bypass;
+    sr->l1_cache_request_no_store = r->l1_cache_request_no_store;
     sr->post_subrequest = ps;
     sr->read_event_handler = ngx_http_request_empty_handler;
     sr->write_event_handler = ngx_http_handler;
@@ -2586,6 +2592,7 @@ ngx_http_subrequest(ngx_http_request_t *r,
     tp = ngx_timeofday();
     sr->start_sec = tp->sec;
     sr->start_msec = tp->msec;
+    sr->start_monotonic_msec = ngx_current_msec;
 
     r->main->count++;
 

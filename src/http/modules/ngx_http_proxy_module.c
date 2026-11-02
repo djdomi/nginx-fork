@@ -1104,6 +1104,7 @@ ngx_http_proxy_create_key(ngx_http_request_t *r)
     }
 
     if (plcf->cache_key.value.data) {
+        r->l1_cache_custom_key = 1;
 
         if (ngx_http_complex_value(r, &plcf->cache_key, key) != NGX_OK) {
             return NGX_ERROR;
@@ -1358,7 +1359,8 @@ ngx_http_proxy_create_request(ngx_http_request_t *r)
                 i = 0;
             }
 
-            if (ngx_hash_find(&headers->hash, header[i].hash,
+            if (header[i].hash == 0
+                || ngx_hash_find(&headers->hash, header[i].hash,
                               header[i].lowcase_key, header[i].key.len))
             {
                 continue;
@@ -1517,7 +1519,8 @@ ngx_http_proxy_create_request(ngx_http_request_t *r)
                 i = 0;
             }
 
-            if (ngx_hash_find(&headers->hash, header[i].hash,
+            if (header[i].hash == 0
+                || ngx_hash_find(&headers->hash, header[i].hash,
                               header[i].lowcase_key, header[i].key.len))
             {
                 continue;

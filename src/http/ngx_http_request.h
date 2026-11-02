@@ -382,6 +382,22 @@ struct ngx_http_posted_request_s {
 typedef ngx_int_t (*ngx_http_handler_pt)(ngx_http_request_t *r);
 typedef void (*ngx_http_event_handler_pt)(ngx_http_request_t *r);
 
+typedef enum {
+    NGX_HTTP_L1_CACHE_LOOKUP = 0,
+    NGX_HTTP_L1_CACHE_L2_HIT,
+    NGX_HTTP_L1_CACHE_L2_MISS,
+    NGX_HTTP_L1_CACHE_L2_STORE_OK,
+    NGX_HTTP_L1_CACHE_L2_STORE_ERROR,
+    NGX_HTTP_L1_CACHE_L2_BYPASS,
+    NGX_HTTP_L1_CACHE_SLICE_HEADERS,
+    NGX_HTTP_L1_CACHE_ORIGIN_REQUEST,
+    NGX_HTTP_L1_CACHE_PURGE,
+    NGX_HTTP_L1_CACHE_INVALIDATE
+} ngx_http_l1_cache_event_e;
+
+typedef ngx_int_t (*ngx_http_l1_cache_handler_pt)(ngx_http_request_t *r,
+    ngx_http_l1_cache_event_e event, ngx_str_t *key, time_t valid_sec);
+
 
 struct ngx_http_request_s {
     uint32_t                          signature;         /* "HTTP" */
@@ -395,6 +411,24 @@ struct ngx_http_request_s {
 
     ngx_http_event_handler_pt         read_event_handler;
     ngx_http_event_handler_pt         write_event_handler;
+
+    ngx_http_l1_cache_handler_pt      l1_cache_handler;
+    ngx_uint_t                        l1_cache_ttl;
+    ngx_str_t                         l1_cache_key_extra;
+    unsigned                          l1_cache_force:1;
+    unsigned                          l1_cache_request_bypass:1;
+    unsigned                          l1_cache_request_no_store:1;
+    unsigned                          l1_cache_request_only_if_cached:1;
+    /*
+     * What: Preserve the active Slice location state.
+     * Why: NGINX clears its private context after a 200.
+     */
+    unsigned                          l1_cache_slice_enabled:1;
+    unsigned                          l1_cache_slice_response:1;
+    unsigned                          l1_cache_custom_key:1;
+    off_t                             l1_cache_slice_start;
+    off_t                             l1_cache_slice_end;
+    off_t                             l1_cache_slice_complete;
 
 #if (NGX_HTTP_CACHE)
     ngx_http_cache_t                 *cache;
@@ -415,6 +449,7 @@ struct ngx_http_request_s {
     time_t                            lingering_time;
     time_t                            start_sec;
     ngx_msec_t                        start_msec;
+    ngx_msec_t                        start_monotonic_msec;
 
     ngx_uint_t                        method;
     ngx_uint_t                        http_version;
@@ -566,6 +601,7 @@ struct ngx_http_request_s {
 
     unsigned                          main_filter_need_in_memory:1;
     unsigned                          filter_need_in_memory:1;
+    unsigned                          l1_cache_filter_need_in_memory:1;
     unsigned                          filter_need_temporary:1;
     unsigned                          preserve_body:1;
     unsigned                          allow_ranges:1;

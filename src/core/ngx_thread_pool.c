@@ -181,15 +181,25 @@ ngx_thread_pool_destroy(ngx_thread_pool_t *tp)
     task.ctx = (void *) &lock;
 
     for (n = 0; n < tp->threads; n++) {
+#if defined(__GNUC__) || defined(__clang__)
+        __atomic_store_n(&lock, 1, __ATOMIC_RELEASE);
+#else
         lock = 1;
+#endif
 
         if (ngx_thread_task_post(tp, &task) != NGX_OK) {
             return;
         }
 
+#if defined(__GNUC__) || defined(__clang__)
+        while (__atomic_load_n(&lock, __ATOMIC_ACQUIRE)) {
+            ngx_sched_yield();
+        }
+#else
         while (lock) {
             ngx_sched_yield();
         }
+#endif
 
         task.event.active = 0;
     }
@@ -203,9 +213,13 @@ ngx_thread_pool_destroy(ngx_thread_pool_t *tp)
 static void
 ngx_thread_pool_exit_handler(void *data, ngx_log_t *log)
 {
-    ngx_uint_t *lock = data;
+    volatile ngx_uint_t *lock = data;
 
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+#else
     *lock = 0;
+#endif
 
     pthread_exit(NULL);
 }

@@ -115,7 +115,8 @@ ngx_http_copy_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
         ctx->sendfile = c->sendfile;
         ctx->need_in_memory = r->main_filter_need_in_memory
-                              || r->filter_need_in_memory;
+                              || r->filter_need_in_memory
+                              || r->l1_cache_filter_need_in_memory;
         ctx->need_in_temp = r->filter_need_temporary;
 
         ctx->alignment = clcf->directio_alignment;
@@ -162,6 +163,13 @@ ngx_http_copy_filter(ngx_http_request_t *r, ngx_chain_t *in)
      */
 
     if (r->main->blocked >= NGX_HTTP_MAX_BLOCKED) {
+        if (r->l1_cache_filter_need_in_memory
+            && !r->main_filter_need_in_memory
+            && !r->filter_need_in_memory)
+        {
+            ctx->need_in_memory = 0;
+            r->l1_cache_filter_need_in_memory = 0;
+        }
 #if (NGX_HAVE_FILE_AIO)
         ctx->aio_handler = NULL;
 #endif
