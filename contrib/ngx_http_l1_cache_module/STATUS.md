@@ -68,6 +68,17 @@ continues to work. Tested in `/tmp/l1-key-mismatch-final.LdKZku`.
 
 `I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified L1/L2 cache-key identity, configured proxy_cache_key evaluation, cache-zone selection, request-variant fingerprinting, and the older RAM module's separate key builder; searched BEFORE for proxy_cache_key, l1_cache_key, l1_cache_proxy_config_matches, and l1_cache_request_key across the repository, the stock NGINX 1.30.6 proxy source, and the older RAM module; found the native proxy complex-value evaluator, the module's exact-expression and zone checks, request-cached key bytes, length-delimited L1 namespace, Force fingerprinting, and the older module's independent key construction; used the native proxy cache as L2 identity owner and the existing module variable/check as the single L1 integration owner; consolidated no duplicate in the current module and retained the older branch only as an unshipped alternative; searched AFTER and found one active current-module key validation and construction path plus the native proxy's cache-key evaluator. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
+## Pre-search reasoning record (r24)
+
+The next review covers Force mode and HTTP conditional request semantics.
+NGINX's native precondition and not-modified filters are the intended owners of
+`If-Match`, `If-None-Match`, `If-Modified-Since`, and
+`If-Unmodified-Since`; the L1 module owns only cache admission and response
+reuse. The review will search the repository for conditional-header removal
+or rewriting, inspect the module's L1-hit and Force paths, compare the stock
+NGINX filter flow, and check the older RAM branch. No second conditional
+parser or test file is planned.
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
