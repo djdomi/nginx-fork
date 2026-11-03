@@ -236,6 +236,7 @@ static ngx_int_t l1_cache_add_status(ngx_http_request_t *r,
     const char *value, size_t len);
 static ngx_table_elt_t *l1_cache_add_header(ngx_http_request_t *r,
     const char *name, size_t name_len, u_char *value, size_t value_len);
+static ngx_int_t l1_cache_set_age_header(ngx_http_request_t *r, time_t age);
 static ngx_int_t l1_cache_update_l2_age(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx);
 static void l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx);
@@ -880,14 +881,68 @@ l1_cache_add_header(ngx_http_request_t *r, const char *name,
 
 
 static ngx_int_t
+l1_cache_set_age_header(ngx_http_request_t *r, time_t age)
+{
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h, *age_header;
+    ngx_uint_t        i, count;
+    u_char           *data, *p;
+    size_t            value_len;
+
+    data = ngx_pnalloc(r->pool, NGX_TIME_T_LEN + 1);
+    if (data == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = ngx_sprintf(data, "%T", age);
+    value_len = p - data;
+    age_header = NULL;
+    count = 0;
+    part = &r->headers_out.headers.part;
+    h = part->elts;
+
+    for ( ;; ) {
+        for (i = 0; i < part->nelts; i++) {
+            if (h[i].hash != 0 && L1_HEADER(h[i], "Age")) {
+                age_header = &h[i];
+                count++;
+            }
+        }
+
+        if (part->next == NULL) {
+            break;
+        }
+
+        part = part->next;
+        h = part->elts;
+    }
+
+    if (count > 1) {
+        return NGX_DECLINED;
+    }
+
+    if (age_header != NULL) {
+        age_header->hash = 0;
+    }
+
+    if (l1_cache_add_header(r, "Age", sizeof("Age") - 1, data, value_len)
+        == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 l1_cache_update_l2_age(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx)
 {
     ngx_list_part_t  *part;
-    ngx_table_elt_t  *h, *age_header;
+    ngx_table_elt_t  *h;
     ngx_uint_t        i;
-    time_t            now, resident, age, age_value;
-    u_char           *data, *p;
+    time_t            now, apparent_age, age, age_value, date;
 
     if (ctx == NULL || r->cache == NULL || !r->cached
         || (!ctx->l2_hit
@@ -898,7 +953,6 @@ l1_cache_update_l2_age(ngx_http_request_t *r,
     }
 
     now = ngx_time();
-    resident = now > r->cache->date ? now - r->cache->date : 0;
     age_value = 0;
     part = &r->headers_out.headers.part;
     h = part->elts;
@@ -916,44 +970,26 @@ l1_cache_update_l2_age(ngx_http_request_t *r,
     }
 
 age_found:
-    age = ngx_max(resident, age_value);
-
-    data = ngx_pnalloc(r->pool, NGX_TIME_T_LEN + 1);
-    if (data == NULL) {
-        /* What: Keeps the cached response if Age cannot be added.
-         * Why: Header accounting is auxiliary to the native L2 hit.
+    date = r->headers_out.date != NULL
+           ? ngx_parse_http_time(r->headers_out.date->value.data,
+                                 r->headers_out.date->value.len)
+           : NGX_ERROR;
+    apparent_age = date != NGX_ERROR && date < now ? now - date : 0;
+    if (age_value != 0) {
+        /*
+         * Stock NGINX does not persist the origin response delay in its L2
+         * cache metadata.  A nonzero stored Age therefore cannot be advanced
+         * reliably for a later L2 hit.  Keep native L2 behavior, but do not
+         * promote this response into L1 with an unverified age.
          */
         ctx->age_update_failed = 1;
         return NGX_OK;
     }
+    age = apparent_age;
 
-    p = ngx_sprintf(data, "%T", age);
-
-    age_header = l1_cache_add_header(r, "Age", sizeof("Age") - 1,
-                                     data, p - data);
-    if (age_header == NULL) {
+    if (l1_cache_set_age_header(r, age) != NGX_OK) {
         ctx->age_update_failed = 1;
         return NGX_OK;
-    }
-
-    part = &r->headers_out.headers.part;
-    h = part->elts;
-
-    for ( ;; ) {
-        for (i = 0; i < part->nelts; i++) {
-            if (h[i].hash != 0 && &h[i] != age_header
-                && L1_HEADER(h[i], "Age"))
-            {
-                h[i].hash = 0;
-            }
-        }
-
-        if (part->next == NULL) {
-            break;
-        }
-
-        part = part->next;
-        h = part->elts;
     }
 
     if (ctx != NULL) {
@@ -3174,6 +3210,12 @@ l1_cache_header_filter(ngx_http_request_t *r)
         (void) l1_cache_admit_response(r, ctx, slice);
     }
 
+    if (ctx != NULL && ctx->admit && !ctx->l2_hit && r->cached == 0) {
+        if (l1_cache_set_age_header(r, ctx->initial_age) != NGX_OK) {
+            ctx->age_update_failed = 1;
+        }
+    }
+
     if (lcf->enabled && ctx != NULL
         && (ctx->lookup || ctx->error_fallback || r->upstream != NULL))
     {
@@ -3263,6 +3305,9 @@ l1_cache_finalize_capture(void *data)
     ngx_http_l1_cache_ctx_t *ctx = data;
 
     l1_cache_update_l2_state(ctx);
+    if (ctx->age_update_failed) {
+        ctx->l2_persisted = 0;
+    }
     if (ctx->admit && ctx->complete) {
         if (ctx->l2_persisted && ctx->l2_miss) {
             /* Keep this fill while invalidating the old entry and other fills. */

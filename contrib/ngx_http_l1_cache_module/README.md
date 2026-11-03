@@ -195,6 +195,15 @@ configure those overrides explicitly; their behavior is an intentional policy
 override. Other proxy-level cache-policy combinations remain subject to the
 documented L1 bypass rules and native NGINX cache behavior.
 
+Age is computed from the origin response delay for a live L1 fill and advanced
+for subsequent L1 hits. Stock NGINX's persistent cache format does not store
+that response-delay value. After a full restart, an L2 hit with a nonzero
+`Age` therefore cannot reconstruct the exact RFC 9111 initial age from native
+cache metadata; the module keeps the response on the normal L2 path and does
+not promote it into L1. L2 responses without `Age` use their `Date` value for
+apparent age. Exact promotion for nonzero `Age` would require additional
+persistent metadata or a native cache-format change.
+
 `l1_cache_force on` on a location overrides request and response cache
 directives, including `no-cache`, `private`, and `no-store`, and uses
 the native L2 validity as the upper bound for L1 validity. Set the L2 lifetime
