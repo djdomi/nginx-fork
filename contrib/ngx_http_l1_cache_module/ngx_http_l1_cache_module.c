@@ -1,5 +1,5 @@
-/* What: Stores validated responses in shared memory.
- * Why: Workers need one common L1 object cache.
+/* What: Stores validated HTTP response bodies.
+ * Why: Workers share one RAM object cache.
  */
 #include <ngx_config.h>
 #include <ngx_core.h>
@@ -42,8 +42,8 @@ struct ngx_http_l1_cache_capture_s {
     ngx_queue_t   queue;
     ngx_pid_t     pid;
     ngx_atomic_t  generation;
-    /* What: Stores capture bytes or an entry address.
-     * Why: Keep capture layout stable across reloads.
+    /* What: Stores capture bytes or a shared entry pointer.
+     * Why: Both capture forms use one shared layout.
      */
     size_t        bytes_or_entry;
     size_t        key_len;
@@ -57,8 +57,8 @@ struct ngx_http_l1_cache_pin_s {
     ngx_http_l1_cache_entry_t *entry;
 };
 
-/* What: Requires address-sized capture storage.
- * Why: Preserve pointer bits in the shared record.
+/* What: Requires pointer-sized capture metadata.
+ * Why: Shared metadata stores pointer-sized values.
  */
 typedef char ngx_http_l1_cache_capture_pointer_fits[
     sizeof(size_t) >= sizeof(uintptr_t) ? 1 : -1];
@@ -857,8 +857,8 @@ l1_cache_add_status(ngx_http_request_t *r, const char *value, size_t len)
 }
 
 
-/* What: Count an error fallback as a bypass once per request.
- * Why: The response continues through NGINX without being served from L1.
+/* What: Counts one error fallback per request.
+ * Why: Fallback responses are not served from L1.
  */
 static void
 l1_cache_mark_error_fallback(ngx_http_l1_cache_ctx_t *ctx)
@@ -1041,10 +1041,8 @@ l1_cache_persist_initial_age(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
-    /*
-     * NGINX copies parsed upstream header values into the request pool.
-     * Locate the corresponding field in the original response buffer, which
-     * is what the native file-cache writer later persists.
+    /* What: Locates the original Age response-header bytes.
+     * Why: The native L2 writer persists the raw response buffer.
      */
     raw = u->buffer.start + r->cache->header_start;
     raw_end = u->buffer.pos;
@@ -1177,8 +1175,8 @@ age_found:
 }
 
 
-/* What: Replays the bounded headers stored for forced cache entries.
- * Why: Vary and Set-Cookie must remain visible on an L1 response.
+/* What: Replays stored response headers for Force entries.
+ * Why: Vary and Set-Cookie remain visible on L1 responses.
  */
 static ngx_int_t
 l1_cache_restore_headers(ngx_http_request_t *r, u_char *data, size_t len)
@@ -1408,10 +1406,8 @@ l1_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
         conf->shpool = shpool;
     }
 
-    /*
-     * What: Compares exact L1 parameters after zone attachment.
-     * Why: The slab pool is unavailable in postconfiguration, and a hash
-     *      collision must not preserve entries across incompatible settings.
+    /* What: Compares L1 settings after zone attachment.
+     * Why: Exact settings prevent incompatible zone reuse.
      */
     l1_cache_conf = conf;
     if (conf->sh->config_max_object != conf->max_object
@@ -1538,8 +1534,8 @@ l1_cache_upstream_peer_init(ngx_http_request_t *r,
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
     if (ctx != NULL && ctx->only_if_cached_peer_guard) {
-        /* What: Stop native upstream selection after its cache lookup missed.
-         * Why: An only-if-cached request must never reach an origin peer.
+        /* What: Stops peer selection after an L2 miss.
+         * Why: only-if-cached forbids an origin request.
          */
         ctx->only_if_cached_peer_blocked = 1;
         if (r->upstream != NULL) {
@@ -1928,20 +1924,16 @@ l1_cache_handler(ngx_http_request_t *r)
 
     ctx->r = r;
     ctx->force = lcf->enabled && lcf->force;
-    /*
-     * What: Snapshot the shared configuration generation for this request.
-     * Why: Reload changes it under the slab mutex; an unlocked read races
-     *      old workers that are still serving requests during graceful exit.
+    /* What: Snapshots the current shared configuration generation.
+     * Why: The slab mutex protects concurrent reload updates.
      */
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     ctx->generation = l1_cache_conf->sh->generation;
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
     l1_cache_request_cache_policy(r, ctx);
     if (ctx->force) {
-        /*
-         * What: Force overrides cache-policy directives, but not the
-         *       client's only-if-cached prohibition on contacting an origin.
-         * Why: The latter controls request routing, not cache admission.
+        /* What: Preserves only-if-cached routing in Force mode.
+         * Why: Force changes admission, not request routing.
          */
         ctx->request_bypass = 0;
         ctx->request_no_store = 0;
@@ -2041,8 +2033,8 @@ l1_cache_handler(ngx_http_request_t *r)
 }
 
 
-/* What: Ask the configured native cache-purge handler to invalidate L2.
- * Why: Stock NGINX exposes no public module API for purging its file cache.
+/* What: Uses the configured native handler to purge L2.
+ * Why: NGINX exposes no public file-cache purge API.
  */
 static ngx_int_t
 l1_cache_start_l2_purge(ngx_http_request_t *r)
@@ -2202,10 +2194,8 @@ l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key)
         return NGX_DECLINED;
     }
     if (entry->generation != ctx->generation) {
-        /*
-         * What: Do not serve or evict entries across reload generations.
-         * Why: An old worker can finish an existing request after a reload;
-         *      its lookup must not consume a new-policy object.
+        /* What: Rejects entries from another generation.
+         * Why: Old workers may serve requests during reload.
          */
         if (entry->generation != l1_cache_conf->sh->generation) {
             ngx_queue_remove(&entry->queue);
@@ -2423,8 +2413,8 @@ l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key)
     ngx_memcpy(type, entry->data + entry->key_len, entry->type_len);
     type[entry->type_len] = '\0';
 
-    /* What: Promote only after an L1 response is fully prepared.
-     * Why: Failed response allocations must not make an object protected.
+    /* What: Promotes after L1 response setup succeeds.
+     * Why: Failed setup must not protect an entry.
      */
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     if (entry->state == L1_ENTRY_READY && entry->indexed) {
@@ -2432,8 +2422,8 @@ l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key)
     }
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
 
-    /* What: Count a hit only after the L1 response is fully prepared.
-     * Why: Allocation fallback is served by the native NGINX path.
+    /* What: Counts a hit after L1 response setup succeeds.
+     * Why: Failed setup falls back to native NGINX.
      */
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->hits, 1);
     if (r->method != NGX_HTTP_HEAD) {
@@ -2522,11 +2512,8 @@ l1_cache_request_allowed(ngx_http_request_t *r, ngx_flag_t slice_request,
 }
 
 
-/*
- * What: Carry request cache directives into NGINX's native L2 decision.
- * Why: The proxy cache does not itself honor request Cache-Control directives.
- *      Bypass reads for policy/credential headers; no-store and credentials
- *      also disable writes.
+/* What: Passes request policy to native L2.
+ * Why: Native proxy cache ignores request directives.
  */
 static void
 l1_cache_request_cache_policy(ngx_http_request_t *r,
@@ -2758,8 +2745,8 @@ l1_cache_purge_request(ngx_http_request_t *r, ngx_str_t *key,
     }
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
 
-    /* What: Continue into the configured native L2 purge handler.
-     * Why: The OSS proxy cache exposes no public purge API to modules.
+    /* What: Continues into the configured native L2 purge handler.
+     * Why: Proxy cache exposes no public module purge API.
      */
     return NGX_DECLINED;
 }
@@ -2835,9 +2822,8 @@ l1_cache_slice_segment(ngx_http_request_t *r, off_t *start, off_t *end,
 }
 
 
-/* What: Parses Cache-Control directive tokens and quoted values.
- * Why: Avoid treating directive-name substrings as cache prohibitions and
- *      reject malformed policy syntax conservatively.
+/* What: Parses Cache-Control tokens and quoted values.
+ * Why: Avoids substring matches and rejects malformed policy.
  */
 static ngx_int_t
 l1_cache_cache_control_allowed(ngx_str_t *value)
@@ -2956,9 +2942,8 @@ l1_cache_cacheable(ngx_http_request_t *r, ngx_flag_t force)
 
     slice_value = l1_cache_slice_range(r);
     slice = slice_value != NULL && !slice_value->not_found;
-    /*
-     * What: Reject unvalidated full responses from Slice.
-     * Why: Their key may identify only the first segment.
+    /* What: Rejects unvalidated full responses from Slice.
+     * Why: A Slice key may identify only one segment.
      */
     if ((!slice && r->headers_out.content_range != NULL)
         || (!slice && r->headers_out.status != NGX_HTTP_OK)
@@ -3022,9 +3007,8 @@ l1_cache_cacheable(ngx_http_request_t *r, ngx_flag_t force)
 }
 
 
-/* What: Reject response fields that must not be replayed across connections.
- * Why: Force mode may preserve unknown end-to-end fields, not hop-by-hop or
- *      NGINX control fields whose meaning belongs to the current response.
+/* What: Filters response fields before Force replay.
+ * Why: Hop-by-hop and NGINX control fields are unsafe.
  */
 static ngx_int_t
 l1_cache_force_header_safe(ngx_table_elt_t *h)
@@ -3260,8 +3244,10 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
     ctx->response_time = ngx_time();
     ctx->response_msec = ngx_current_msec;
 
-    /* What: Calculate RFC 9111 corrected initial age. */
-    /* Why: Delay applies to Age, never apparent age or L2. */
+    /* What: Calculates RFC 9111 corrected initial age.
+     * Why: Delay affects corrected age, not apparent age.
+     */
+
     response_delay = 0;
     if (!ctx->l2_hit) {
         if (r->upstream != NULL && r->upstream->state != NULL
@@ -3354,10 +3340,8 @@ l1_cache_admit_response(ngx_http_request_t *r,
 
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     l1_cache_reap_captures_locked();
-    /*
-     * What: Reject an L1 capture when the object became READY after lookup.
-     * Why: A concurrent response can finish between PRECONTENT lookup and
-     *      this response's header filter; avoid buffering a duplicate body.
+    /* What: Rejects capture if L1 filled after lookup.
+     * Why: Avoids duplicate capture after a concurrent fill.
      */
     if (l1_cache_find(&ctx->key, ctx->force) != NULL) {
         ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
@@ -3365,9 +3349,8 @@ l1_cache_admit_response(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
-    /*
-     * What: Allow one active L1 capture per key.
-     * Why: Duplicate captures waste the bounded build budget.
+    /* What: Allows one active capture per key.
+     * Why: Duplicate fills consume bounded memory.
      */
     for (q = ngx_queue_head(&l1_cache_conf->sh->captures);
          q != ngx_queue_sentinel(&l1_cache_conf->sh->captures);
@@ -3518,9 +3501,8 @@ l1_cache_header_filter(ngx_http_request_t *r)
             r->headers_out.content_length = NULL;
             r->headers_out.content_length_n = body_len;
         } else {
-            /*
-             * What: Return a bodyless 504 if request-pool allocation fails.
-             * Why: Never expose the upstream's internal 500 page as a 504.
+            /* What: Returns a bodyless 504 on allocation failure.
+             * Why: Avoids pairing 504 status with the upstream 500 body.
              */
             r->headers_out.content_length = NULL;
             r->headers_out.content_length_n = 0;
@@ -3578,9 +3560,8 @@ l1_cache_header_filter(ngx_http_request_t *r)
     if (ctx != NULL && ctx->admit && !ctx->l2_hit && r->cached == 0) {
         rc = l1_cache_persist_initial_age(r, ctx);
         if (rc != NGX_OK) {
-            /*
-             * Neither cache may retain an Age value that cannot be updated
-             * safely in the native response buffer.
+            /* What: Rejects an Age value that cannot be updated safely.
+             * Why: Neither cache can retain a stale Age representation.
              */
             ctx->age_update_failed = 1;
             ctx->admit = 0;
@@ -3706,7 +3687,9 @@ l1_cache_finalize_capture(void *data)
     }
     if (ctx->admit && ctx->complete) {
         if (ctx->l2_persisted && ctx->l2_miss) {
-            /* Keep this fill while invalidating the old entry and other fills. */
+            /* What: Preserves this fill during key invalidation.
+             * Why: The active response may publish the replacement object.
+             */
             l1_cache_invalidate(&ctx->key, ctx->capture);
         }
         l1_cache_store_capture(ctx);
@@ -3715,8 +3698,8 @@ l1_cache_finalize_capture(void *data)
 }
 
 
-/* What: Read native L2 publication state after NGINX finalizes the response.
- * Why: A valid node alone can still refer to an older, failed replacement.
+/* What: Checks native L2 publication after completion.
+ * Why: A valid node may predate a failed replacement.
  */
 static void
 l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
@@ -3733,10 +3716,8 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
 
     now = ngx_time();
     ngx_shmtx_lock(&cache->shpool->mutex);
-    /*
-     * What: Bind the persistence check to this request's exact L2 file.
-     * Why: A purge/replacement can reuse the shared node before this response
-     *      finishes; node existence alone would then bless the old body.
+    /* What: Binds publication checking to this request's L2 file.
+     * Why: PURGE can reuse the node before the response completes.
      */
     ctx->l2_persisted = c->node->exists && c->node->uniq != 0
                         && c->node->uniq == c->uniq
@@ -3972,8 +3953,8 @@ size_overflow:
 }
 
 
-/* What: Copies a completed response into shared-memory blocks.
- * Why: Keep the shared lock outside the full body copy.
+/* What: Copies completed bodies into shared-memory blocks.
+ * Why: The shared lock must not cover the body copy.
  */
 static void
 l1_cache_copy_capture_body(ngx_http_l1_cache_entry_t *entry, u_char *body)
@@ -4134,8 +4115,8 @@ l1_cache_reap_captures_locked(void)
         if (kill(capture->pid, 0) != -1 || ngx_errno != NGX_ESRCH) continue;
         ngx_queue_remove(q);
         bytes = l1_cache_capture_reserved_bytes(capture);
-        /* What: Frees unpublished blocks after owner exit.
-         * Why: Body copying runs without the shared mutex.
+        /* What: Frees unpublished blocks after worker exit.
+         * Why: Body copying runs outside the shared mutex.
          */
         if (capture->flags & L1_CAPTURE_HAS_ENTRY) {
             l1_cache_free_entry_locked((ngx_http_l1_cache_entry_t *)

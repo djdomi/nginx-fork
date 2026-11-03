@@ -13,6 +13,27 @@ search the complete module source and repository for duplicate only-if-cached
 guards, then compare peer-init callback use with the target NGINX source and
 the older RAM module. No new owner or test file is planned.
 
+## Search and ownership result (r22)
+
+The repository search found the module request-context guard and a separate
+fork-only `l1_cache_request_only_if_cached` field/path in
+`src/http/ngx_http_request.h` and `src/http/ngx_http_upstream.c`. The stock
+Alpine NGINX 1.30.6 source has no such L1 fields. Its upstream peer-init
+callback is the point reached after native cache lookup; the native keepalive
+wrapper stores and calls its original peer-init callback. The module wraps
+that callback and delegates to the stored callback for ordinary requests.
+The older RAM module has no matching only-if-cached or peer-init guard.
+
+For the stock dynamic module, `l1_cache_handler()` owns request policy,
+`l1_cache_upstream_peer_init()` prevents origin selection after a native L2
+miss, and NGINX's proxy cache remains the L2 response owner. The fork-only
+request-field path is not referenced by the module and is not available in
+stock NGINX; it remains outside the dynamic module's ABI dependency. The
+complete module comment audit found 29 block comments; all now use the
+required two-line `What:` / `Why:` form with fields at most 60 characters.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the stock-NGINX only-if-cached L2-miss guard, its request-policy owner, existing fork-only request fields, peer-init wrappers, and the older RAM module; searched BEFORE for only-if-cached and peer-init implementations across the repository, stock NGINX 1.30.6 source, and the older module; found the current module guard, fork-only fields in request/upstream code, no matching older-module implementation, and NGINX keepalive's callback wrapper; used the current module handler and peer-init guard for stock NGINX request policy while native proxy cache remains the L2 response owner; consolidated no duplicate within the module and kept the fork-only core path separate because stock NGINX lacks those fields; searched AFTER and found exactly one module peer-init guard for the stock dynamic path. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
@@ -28,7 +49,7 @@ the older RAM module. No new owner or test file is planned.
 | Force-Preconditions und Isolation | PASS für geprüfte Fälle | Vorhandener Lauf: If-None-Match→304, If-Match→412; Force-Varianten mit Cookie/Vary wurden getrennt. |
 | Force mit `only-if-cached` | PASS | Mit installiertem r17 und Force an lieferte ein Request auf leere L1/L2 504; das Origin-Zugriffslog blieb leer. r18 ändert diesen Pfad nicht. |
 | `only-if-cached` bei Proxy-Bypass oder deaktiviertem L1 | PASS | Mit installiertem r19: eine aktivierte L1-Location mit zutreffendem `proxy_cache_bypass` und eine Location mit `l1_cache off` lieferten jeweils 504; das Origin-Zugriffslog blieb bei 0 Requests. |
-| `only-if-cached` bei L2-only HIT/MISS | PASS | Mit installiertem r21 wurde `/seed` in L2 gefüllt. Nach vollständigem Proxy-Neustart (L1 leer) lieferte `Cache-Control: only-if-cached` HTTP 200 mit `X-Cache: HIT`; der Body entsprach bytegenau dem Fill. Ein nicht vorhandenes `/miss` lieferte 504 mit `X-Cache: MISS`. Das Origin-Log enthielt nur den `/seed`-Fill und keinen Request für `/miss`. Laufverzeichnis: `/tmp/l1-r20-oic.zbfe2Q`. |
+| `only-if-cached` bei L2-only HIT/MISS | PASS | Mit installiertem r21 wurde `/seed` in L2 gefüllt. Nach vollständigem Proxy-Neustart (L1 leer) lieferte `Cache-Control: only-if-cached` HTTP 200 mit `X-Cache: HIT`; der Body entsprach bytegenau dem Fill. Ein nicht vorhandenes `/miss` lieferte 504 mit `X-Cache: MISS`. Das Origin-Log enthielt nur den `/seed`-Fill und keinen Request für `/miss`. Zusätzlich bestand derselbe Pfad mit NGINX-Upstream-`keepalive 4`, HTTP/1.1 und leerem `Connection`-Header. Laufverzeichnisse: `/tmp/l1-r20-oic.zbfe2Q` und `/tmp/l1-r21-keepalive.VDYyTS`. |
 | Force-Override von Request-`no-store` | PASS | r17: zwei identische `Cache-Control: no-store`-Requests lieferten 200; der zweite war `L1_HIT`, Origin-Anfragen insgesamt 1, Bodies bytegleich (SHA-256 `4ecef658a2d719a545a588eee0124f62ad85df41fa517f32e0aaf61c453ec97d`). Die Origin-Antwort enthielt ebenfalls `Cache-Control: no-store`, das in dieser explizit erzwungenen Konfiguration für L2 ignoriert wurde. r18 ändert diesen Pfad nicht. |
 | RFC-9111 Age über persistentem L2 | PASS für geprüften Pfad | Ein Origin-`Age: 5` mit 1,5 s Antwortverzögerung wurde als `Age: 7` ausgegeben und im nativen L2-Header gespeichert. Nach Neustart lieferte L2 `Age: 16`, danach L1 `Age: 17`; alle drei Bodies hatten denselben SHA-256. Der Test lief mit installiertem APK gegen Stock-Alpine-NGINX 1.30.6-r0. |
 | Age-Header kann nicht sicher geändert werden | PASS | Mit `Age: 5` und 10 s Antwortverzögerung war die korrigierte Zahl breiter als die Origin-Headerstelle. Zwei Requests gaben `Age: 16`, `BYPASS`, L2-MISS, null L1-Objekte und bytegleiche Bodies zurück; der L2-Cache blieb leer. Geprüft mit installiertem r16 auf Stock-NGINX 1.30.6-r0. |
