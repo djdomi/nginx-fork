@@ -184,6 +184,19 @@ second cache writer or lookup implementation.
 
 `I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified that variable proxy only-if-cached requests must attempt L1 before a fail-closed miss, and that stock NGINX's new-file uniq lives on the shared cache node; searched BEFORE for all handler guards, cache eligibility, native proxy processing, the older module, and file-cache identity writes; found one L1 handler, one static peer guard, and one L2 publication verifier; reused those owners and native cache writes; after editing, searched AFTER all l2_persisted and l2_revalidated paths, cache identity comparisons, and native file-cache writes and found no duplicate cache writer or lookup. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
+## Pre-search reasoning record (r26)
+
+The next review classifies every NGINX core file changed between the PR branch
+and `origin/master`. The r23 module now builds, loads, and serves tested L1/L2
+requests against the installed unmodified Alpine NGINX 1.30.6 package. This is
+evidence that those core changes are not required by the shipped module path;
+it does not by itself show whether each change is an independent correction.
+The review will inspect each complete file diff, trace the changed symbols to
+the module and native NGINX owners, and compare with the original change that
+introduced them. No core file will be reset until each hunk is classified and
+the consequence of removal is documented. The intended PR scope is the
+installable module and its package, not an NGINX core fork.
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
