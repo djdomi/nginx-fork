@@ -222,7 +222,7 @@ static ngx_int_t l1_cache_stat_variable(ngx_http_request_t *r,
 static ngx_int_t l1_cache_key_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_flag_t l1_cache_proxy_config_matches(ngx_http_request_t *r,
-    ngx_http_l1_cache_loc_conf_t *lcf);
+    ngx_http_l1_cache_loc_conf_t *lcf, ngx_flag_t *cache_bypass);
 static ngx_int_t l1_cache_zone_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t l1_cache_request_policy_variable(ngx_http_request_t *r,
@@ -662,12 +662,13 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
 static ngx_flag_t
 l1_cache_proxy_config_matches(ngx_http_request_t *r,
-    ngx_http_l1_cache_loc_conf_t *lcf)
+    ngx_http_l1_cache_loc_conf_t *lcf, ngx_flag_t *cache_bypass)
 {
     static u_char key_variable[] = "$l1_cache_key";
     ngx_http_proxy_loc_conf_t *plcf;
     ngx_str_t zone;
 
+    *cache_bypass = 0;
     plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
     if (plcf == NULL || plcf->upstream.cache == 0
         || plcf->cache_key.value.len != sizeof(key_variable) - 1
@@ -675,6 +676,15 @@ l1_cache_proxy_config_matches(ngx_http_request_t *r,
                       sizeof(key_variable) - 1) != 0)
     {
         return 0;
+    }
+
+    if (plcf->upstream.cache_bypass != NULL) {
+        if (ngx_http_test_predicates(r, plcf->upstream.cache_bypass)
+            != NGX_OK)
+        {
+            *cache_bypass = 1;
+            return 0;
+        }
     }
 
     if (plcf->upstream.cache_value != NULL) {
@@ -1031,6 +1041,9 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_l1_cache_loc_conf_t *prev = parent;
     ngx_http_l1_cache_loc_conf_t *conf = child;
     ngx_http_l1_cache_main_conf_t *mcf;
+    ngx_http_proxy_loc_conf_t *plcf;
+    ngx_http_complex_value_t *predicate;
+    ngx_uint_t i;
 #if (NGX_THREADS)
     ngx_http_core_loc_conf_t *clcf;
 #endif
@@ -1053,6 +1066,26 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         }
         if (conf->l2_zone.len == 0 || conf->key == NULL) {
             return "l1_cache_l2_zone and l1_cache_key must be configured";
+        }
+        plcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_proxy_module);
+        if (plcf != NULL && plcf->upstream.cache_bypass != NULL) {
+            predicate = plcf->upstream.cache_bypass->elts;
+            for (i = 0; i < plcf->upstream.cache_bypass->nelts; i++) {
+                if (l1_cache_key_source_safe(&predicate[i].value) != NGX_OK) {
+                    return "l1_cache requires proxy_cache_bypass variables to be available in PRECONTENT";
+                }
+            }
+        }
+        if (!conf->force) {
+            if (plcf != NULL
+                && (plcf->upstream.ignore_headers
+                    & (NGX_HTTP_UPSTREAM_IGN_CACHE_CONTROL
+                       | NGX_HTTP_UPSTREAM_IGN_EXPIRES
+                       | NGX_HTTP_UPSTREAM_IGN_SET_COOKIE
+                       | NGX_HTTP_UPSTREAM_IGN_VARY)))
+            {
+                return "normal l1_cache cannot be used with proxy_ignore_headers Cache-Control, Expires, Set-Cookie, or Vary";
+            }
         }
 #if !(NGX_OPENSSL)
         if (conf->force) {
@@ -1552,6 +1585,7 @@ l1_cache_handler(ngx_http_request_t *r)
     ngx_http_variable_value_t *slice_value;
     ngx_int_t slice, rc;
     ngx_str_t key;
+    ngx_flag_t cache_bypass;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
     if (ctx != NULL && ctx->internal_l2_purge) {
@@ -1584,7 +1618,17 @@ l1_cache_handler(ngx_http_request_t *r)
     }
     ngx_http_set_ctx(r, ctx, ngx_http_l1_cache_module);
 
-    if (lcf->enabled && !l1_cache_proxy_config_matches(r, lcf)) {
+    cache_bypass = 0;
+    if (lcf->enabled && !l1_cache_proxy_config_matches(
+                            r, lcf, &cache_bypass))
+    {
+        if (ctx->request_revalidate
+            || (cache_bypass && !ctx->request_bypass))
+        {
+            if (l1_cache_request_key(r, &ctx->key) == NGX_OK) {
+                ctx->invalidate_after_response = 1;
+            }
+        }
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
         return NGX_DECLINED;
     }
@@ -1605,12 +1649,6 @@ l1_cache_handler(ngx_http_request_t *r)
     }
 
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->requests, 1);
-
-    if (ctx->request_revalidate
-        && l1_cache_request_key(r, &ctx->key) == NGX_OK)
-    {
-        ctx->invalidate_after_response = 1;
-    }
 
     if (r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD) {
         if (l1_cache_request_key(r, &ctx->key) == NGX_OK) {
@@ -2911,12 +2949,20 @@ l1_cache_admit_response(ngx_http_request_t *r,
     u_char *content_range;
     size_t active_key_len;
     u_char *active_key;
+    ngx_http_proxy_loc_conf_t *plcf;
 
     if (ctx == NULL || ctx->admit || ctx->hit || !ctx->lookup
         || r->main->method != NGX_HTTP_GET
         || (r != r->main && !slice)
         || !l1_cache_request_allowed(r->main, slice, ctx->force, ctx)
         || !l1_cache_cacheable(r, ctx->force))
+    {
+        return NGX_DECLINED;
+    }
+
+    plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
+    if (plcf != NULL && plcf->upstream.no_cache != NULL
+        && ngx_http_test_predicates(r, plcf->upstream.no_cache) != NGX_OK)
     {
         return NGX_DECLINED;
     }

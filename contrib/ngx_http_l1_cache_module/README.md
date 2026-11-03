@@ -161,6 +161,15 @@ enforced by the NGINX integration because `proxy_cache_bypass` alone does not
 interpret these directives. `l1_cache_force on` explicitly overrides it and
 fingerprints request headers to keep credential variants separate.
 
+The module evaluates native `proxy_cache_bypass` predicates before its L1
+lookup. A true predicate bypasses L1; after a successful response, the prior
+L1 object for that key is invalidated so an older L1 copy cannot hide a
+refreshed native L2 entry. Such predicates must use variables available in
+PRECONTENT; NGINX rejects an L1-enabled location whose bypass expression refers
+to `$proxy_host`, `$proxy_port`, or `$upstream_*`. Native `proxy_no_cache`
+predicates remain authoritative for whether an upstream response may be
+admitted to L1, matching their native role as write controls.
+
 Successful responses to unsafe methods (2xx or 3xx) invalidate the matching
 L1 entry; failed responses leave it usable. Set `l1_cache_l2_purge on` to
 schedule a background internal `PURGE` subrequest to the configured native
@@ -179,9 +188,12 @@ normal proxy path. This L2-only limitation remains open.
 The module rejects L1 admission for response policies it does not support.
 The native NGINX proxy cache remains the L2 policy owner. Do not set
 `proxy_ignore_headers` for cache-control or representation headers in a normal
-location: that can make L2 ignore restrictions which L1 correctly rejects.
-The module does not yet validate every proxy-level cache-policy override at
-configuration time.
+location: L1-enabled normal locations reject `proxy_ignore_headers` for
+`Cache-Control`, `Expires`, `Set-Cookie`, or `Vary`, because these overrides can
+make L2 ignore restrictions which L1 correctly enforces. Force locations may
+configure those overrides explicitly; their behavior is an intentional policy
+override. Other proxy-level cache-policy combinations remain subject to the
+documented L1 bypass rules and native NGINX cache behavior.
 
 `l1_cache_force on` on a location overrides request and response cache
 directives, including `no-cache`, `private`, and `no-store`, and uses
