@@ -244,7 +244,8 @@ static ngx_int_t l1_cache_restore_headers(ngx_http_request_t *r,
 static ngx_int_t l1_cache_purge_request(ngx_http_request_t *r,
     ngx_str_t *key, ngx_str_t *token);
 static ngx_int_t l1_cache_start_l2_purge(ngx_http_request_t *r);
-static void l1_cache_invalidate(ngx_str_t *key);
+static void l1_cache_invalidate(ngx_str_t *key,
+    ngx_http_l1_cache_capture_t *preserve);
 static ngx_int_t l1_cache_handler(ngx_http_request_t *r);
 static ngx_int_t l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key);
 static ngx_int_t l1_cache_header_filter(ngx_http_request_t *r);
@@ -1699,7 +1700,8 @@ l1_cache_request_key(ngx_http_request_t *r, ngx_str_t *key)
 
 
 static void
-l1_cache_invalidate(ngx_str_t *key)
+l1_cache_invalidate(ngx_str_t *key,
+    ngx_http_l1_cache_capture_t *preserve)
 {
     ngx_queue_t *q;
     ngx_http_l1_cache_entry_t *entry;
@@ -1726,6 +1728,9 @@ l1_cache_invalidate(ngx_str_t *key)
          q = ngx_queue_next(q))
     {
         capture = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
+        if (capture == preserve) {
+            continue;
+        }
         capture_key = l1_cache_capture_key(capture, &capture_key_len);
         if (capture_key_len == key->len
             && ngx_memcmp(capture_key, key->data, key->len) == 0)
@@ -3101,7 +3106,7 @@ l1_cache_header_filter(ngx_http_request_t *r)
         && r->headers_out.status >= NGX_HTTP_OK
         && r->headers_out.status < NGX_HTTP_BAD_REQUEST)
     {
-        l1_cache_invalidate(&ctx->key);
+        l1_cache_invalidate(&ctx->key, NULL);
         if (ctx->purge_l2_after_response && r == r->main
             && l1_cache_start_l2_purge(r) != NGX_OK)
         {
@@ -3214,7 +3219,8 @@ l1_cache_finalize_capture(void *data)
     l1_cache_update_l2_state(ctx);
     if (ctx->admit && ctx->complete) {
         if (ctx->l2_persisted && ctx->l2_miss) {
-            l1_cache_invalidate(&ctx->key);
+            /* Keep this fill while invalidating the old entry and other fills. */
+            l1_cache_invalidate(&ctx->key, ctx->capture);
         }
         l1_cache_store_capture(ctx);
     }
