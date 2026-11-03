@@ -79,6 +79,8 @@ geprüft. Das Paket hängt exakt von
 `nginx=1.30.6-r0` und `nginx-mod-http-cache-purge=1.30.6-r0` ab.
 Nach Installation des r19-Pakets auf dem vorhandenen Alpine-System war auch
 `sudo nginx -t` erfolgreich.
+`apk verify alpine/dist/nginx-mod-l1-cache-1.30.6-r19.apk` meldete `OK` mit
+dem im Repository enthaltenen und auf dem System vertrauenswürdigen Schlüssel.
 
 ## Gesamtstatus
 
