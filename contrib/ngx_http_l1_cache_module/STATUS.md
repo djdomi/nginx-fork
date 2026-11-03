@@ -22,6 +22,14 @@ Stand: Arbeitsbranch auf Basis `c59350be6`, Alpine x86_64,
 | Age-Header kann nicht sicher geändert werden | PASS | Mit `Age: 5` und 10 s Antwortverzögerung war die korrigierte Zahl breiter als die Origin-Headerstelle. Zwei Requests gaben `Age: 16`, `BYPASS`, L2-MISS, null L1-Objekte und bytegleiche Bodies zurück; der L2-Cache blieb leer. Geprüft mit installiertem r16 auf Stock-NGINX 1.30.6-r0. |
 | Gesamte verbindliche Testmatrix | OPEN | Vorhandene erfolgreiche Nachweise wurden wiederverwendet. Die vollständige Matrix für alle Range-, Fehler-, Konkurrenz-, Reload- und Speicherfälle ist für den aktuellen Paketstand nicht vollständig belegt. |
 
+Der erste kombinierte Force-Lauf prüfte den Folgezugriff ohne denselben
+`Cache-Control`-Requestheader wie beim Fill. Dadurch erzeugte die beabsichtigte
+Force-Request-Fingerprinting-Logik einen anderen Schlüssel; die zwei
+Origin-Anfragen waren kein Cachefehler. Der `only-if-cached`-Teil dieses Laufs
+war bereits erfolgreich (504, null Origin-Anfragen). Die Force-`no-store`
+Verifikation wurde anschließend mit identischen Requests gezielt erfolgreich
+abgeschlossen.
+
 ## NGINX-Kernänderungen im Arbeitsbranch
 
 `git diff master...HEAD -- src` zeigt aktuell 14 geänderte Kerndateien. Der dynamische Modulbuild und die Laufzeitprüfung oben belegen, dass die folgenden Fork-Erweiterungen keine Voraussetzung für das installierte Modul sind. Das Modul verwendet jedoch private NGINX-Strukturen (`ngx_http_cache_t`, Proxy-Loc-Conf und Upstream-Status); deshalb ist das Paket exakt an die NGINX-Version und ABI gebunden.
