@@ -44,14 +44,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r19.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r21.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r19.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r21.apk
 sudo nginx -t
 ```
 
@@ -146,19 +146,14 @@ validates its purge token and invalidates shared-memory objects before handing
 the request to that L2 purge handler. PURGE of `/` invalidates every L1 object;
 the OSS L2 purge module purges the key represented by that request.
 
-`only-if-cached` remains an open limitation for an L2-only hit. In stock NGINX,
-the static `ngx_http_proxy_handler()` in
-`src/http/modules/ngx_http_proxy_module.c` synchronously calls
-`ngx_http_upstream_init()`. Its static request path invokes
-`ngx_http_upstream_cache()` and, on a miss, continues directly to peer
-resolution and connection setup. There is no dynamic-module callback between
-the cache result and that origin path. `ngx_http_proxy_process_header()` and
-`ngx_http_upstream_cache_send()` are static as well. The exported file-cache
-reader can open an L2 object, but `ngx_http_cache_send()` expects response
-headers to have already been parsed and only sends the cached body. Reusing
-that reader alone therefore does not provide the native proxy's response
-semantics. The module serves an L1 hit and returns 504 on an L1 miss; it does
-not claim complete RFC behavior for an L2-only hit.
+For `only-if-cached`, the module delegates eligible static proxy-upstream
+requests to NGINX's native cache path. A native L2 hit retains NGINX's normal
+response parsing and headers. On an L2 miss, the module's peer-init guard
+stops the request before origin peer selection and converts the result to
+504. Dynamic `proxy_pass` targets, active `proxy_cache_bypass`, and
+unsupported methods fail closed with 504. The installed r21 package was
+verified after a proxy restart: an L2-only hit returned the byte-identical
+body with `X-Cache: HIT`; an L2 miss returned 504 without an origin request.
 
 The default policy is a conservative RFC-oriented subset. It serves complete
 GET 200 responses and validated native Slice 206 segments; HEAD can reuse

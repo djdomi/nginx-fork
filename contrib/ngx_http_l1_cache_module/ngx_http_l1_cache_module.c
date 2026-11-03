@@ -6,6 +6,7 @@
 #include <ngx_http.h>
 #include <ngx_http_cache.h>
 #include <ngx_http_proxy_module.h>
+#include <ngx_http_upstream.h>
 
 #define L1_HEADER(h, s) \
     ((h).key.len == sizeof(s) - 1 \
@@ -31,6 +32,11 @@ static ngx_str_t l1_cache_key_name = ngx_string("l1_cache_key");
 typedef struct ngx_http_l1_cache_entry_s ngx_http_l1_cache_entry_t;
 typedef struct ngx_http_l1_cache_capture_s ngx_http_l1_cache_capture_t;
 typedef struct ngx_http_l1_cache_pin_s ngx_http_l1_cache_pin_t;
+
+typedef struct {
+    ngx_http_upstream_srv_conf_t *upstream;
+    ngx_http_upstream_init_peer_pt init;
+} ngx_http_l1_cache_peer_hook_t;
 
 struct ngx_http_l1_cache_capture_s {
     ngx_queue_t   queue;
@@ -145,6 +151,7 @@ typedef struct {
     ngx_uint_t                   protected_percent;
     ngx_uint_t                   building_percent;
     ngx_str_t                    key_id;
+    ngx_array_t                  peer_hooks;
 } ngx_http_l1_cache_main_conf_t;
 
 typedef struct {
@@ -170,6 +177,9 @@ typedef struct {
     ngx_str_t    expires_header;
     ngx_str_t    encoding;
     ngx_str_t    extra_headers;
+    ngx_chain_t *only_if_cached_chain;
+    u_char      *only_if_cached_body;
+    size_t       only_if_cached_body_len;
     u_char      *body;
     size_t       len;
     size_t       reserved_bytes;
@@ -202,6 +212,9 @@ typedef struct {
     ngx_uint_t   purge_l2_after_response:1;
     ngx_uint_t   internal_l2_purge:1;
     ngx_uint_t   proxy_key_ready:1;
+    ngx_uint_t   only_if_cached_peer_guard:1;
+    ngx_uint_t   only_if_cached_peer_blocked:1;
+    ngx_uint_t   only_if_cached_body_replaced:1;
     ngx_http_l1_cache_capture_t *capture;
 } ngx_http_l1_cache_ctx_t;
 
@@ -215,6 +228,10 @@ static void *l1_cache_create_main_conf(ngx_conf_t *cf);
 static char *l1_cache_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t l1_cache_zone_init(ngx_shm_zone_t *zone, void *data);
 static ngx_int_t l1_cache_init(ngx_conf_t *cf);
+static ngx_int_t l1_cache_upstream_peer_init(ngx_http_request_t *r,
+    ngx_http_upstream_srv_conf_t *uscf);
+static ngx_flag_t l1_cache_only_if_cached_delegate(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx);
 static ngx_int_t l1_cache_add_variables(ngx_conf_t *cf);
 static void l1_cache_mark_error_fallback(ngx_http_l1_cache_ctx_t *ctx);
 static ngx_int_t l1_cache_stat_variable(ngx_http_request_t *r,
@@ -1444,8 +1461,12 @@ static ngx_int_t
 l1_cache_init(ngx_conf_t *cf)
 {
     ngx_http_core_main_conf_t *cmcf;
+    ngx_http_upstream_main_conf_t *umcf;
+    ngx_http_upstream_srv_conf_t **uscfp;
+    ngx_http_l1_cache_peer_hook_t *hook;
     ngx_http_handler_pt *handler;
     ngx_http_l1_cache_main_conf_t *conf;
+    ngx_uint_t i;
     conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_l1_cache_module);
     ngx_conf_init_size_value(conf->max_object, L1_MAX_OBJECT);
     ngx_conf_init_size_value(conf->block_size, L1_BLOCK_SIZE);
@@ -1467,6 +1488,33 @@ l1_cache_init(ngx_conf_t *cf)
         return NGX_ERROR;
     }
     l1_cache_conf = conf;
+
+    umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
+    if (umcf != NULL && umcf->upstreams.nelts != 0) {
+        if (ngx_array_init(&conf->peer_hooks, cf->pool,
+                           umcf->upstreams.nelts,
+                           sizeof(ngx_http_l1_cache_peer_hook_t)) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+        uscfp = umcf->upstreams.elts;
+        for (i = 0; i < umcf->upstreams.nelts; i++) {
+            if (uscfp[i]->peer.init == NULL) {
+                continue;
+            }
+
+            hook = ngx_array_push(&conf->peer_hooks);
+            if (hook == NULL) {
+                return NGX_ERROR;
+            }
+
+            hook->upstream = uscfp[i];
+            hook->init = uscfp[i]->peer.init;
+            uscfp[i]->peer.init = l1_cache_upstream_peer_init;
+        }
+    }
+
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
     handler = ngx_array_push(&cmcf->phases[NGX_HTTP_PRECONTENT_PHASE].handlers);
     if (handler == NULL) return NGX_ERROR;
@@ -1476,6 +1524,85 @@ l1_cache_init(ngx_conf_t *cf)
     l1_cache_next_body_filter = ngx_http_top_body_filter;
     ngx_http_top_body_filter = l1_cache_body_filter;
     return NGX_OK;
+}
+
+
+static ngx_int_t
+l1_cache_upstream_peer_init(ngx_http_request_t *r,
+    ngx_http_upstream_srv_conf_t *uscf)
+{
+    ngx_http_l1_cache_ctx_t *ctx;
+    ngx_http_l1_cache_main_conf_t *mcf;
+    ngx_http_l1_cache_peer_hook_t *hooks;
+    ngx_uint_t i;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->only_if_cached_peer_guard) {
+        /* What: Stop native upstream selection after its cache lookup missed.
+         * Why: An only-if-cached request must never reach an origin peer.
+         */
+        ctx->only_if_cached_peer_blocked = 1;
+        if (r->upstream != NULL) {
+            r->upstream->cacheable = 0;
+        }
+        return NGX_ERROR;
+    }
+
+    mcf = ngx_http_get_module_main_conf(r, ngx_http_l1_cache_module);
+    if (mcf == NULL || mcf->peer_hooks.elts == NULL) {
+        return NGX_ERROR;
+    }
+
+    hooks = mcf->peer_hooks.elts;
+    for (i = 0; i < mcf->peer_hooks.nelts; i++) {
+        if (hooks[i].upstream == uscf) {
+            return hooks[i].init(r, uscf);
+        }
+    }
+
+    return NGX_ERROR;
+}
+
+
+static ngx_flag_t
+l1_cache_only_if_cached_delegate(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx)
+{
+    ngx_http_l1_cache_main_conf_t *mcf;
+    ngx_http_l1_cache_peer_hook_t *hooks;
+    ngx_http_proxy_loc_conf_t *plcf;
+    ngx_uint_t i;
+
+    if (ctx == NULL || !ctx->request_only_if_cached) {
+        return 0;
+    }
+
+    plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
+    if (plcf == NULL || !plcf->upstream.cache
+        || plcf->proxy_lengths != NULL || plcf->upstream.upstream == NULL)
+    {
+        return 0;
+    }
+
+    if (plcf->upstream.cache_bypass != NULL
+        && ngx_http_test_predicates(r, plcf->upstream.cache_bypass) != NGX_OK)
+    {
+        return 0;
+    }
+
+    mcf = ngx_http_get_module_main_conf(r, ngx_http_l1_cache_module);
+    if (mcf == NULL || mcf->peer_hooks.elts == NULL) {
+        return 0;
+    }
+
+    hooks = mcf->peer_hooks.elts;
+    for (i = 0; i < mcf->peer_hooks.nelts; i++) {
+        if (hooks[i].upstream == plcf->upstream.upstream) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 
@@ -1826,6 +1953,15 @@ l1_cache_handler(ngx_http_request_t *r)
     if (lcf->enabled && !l1_cache_proxy_config_matches(
                             r, lcf, &cache_bypass))
     {
+        if (ctx->request_only_if_cached) {
+            if (cache_bypass
+                || !l1_cache_only_if_cached_delegate(r, ctx))
+            {
+                return NGX_HTTP_GATEWAY_TIME_OUT;
+            }
+            ctx->only_if_cached_peer_guard = 1;
+        }
+
         if (ctx->request_revalidate
             || (cache_bypass && !ctx->request_bypass))
         {
@@ -1834,12 +1970,6 @@ l1_cache_handler(ngx_http_request_t *r)
             }
         }
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
-        /* What: Stop an only-if-cached request on an L1/L2 bypass.
-         * Why: Falling through to the native proxy could contact the origin.
-         */
-        if (ctx->request_only_if_cached) {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
-        }
         return NGX_DECLINED;
     }
 
@@ -1854,10 +1984,16 @@ l1_cache_handler(ngx_http_request_t *r)
                                       &l1_cache_conf->purge_token);
     }
 
-    if (!lcf->enabled) {
-        if (ctx->request_only_if_cached) {
+    if (ctx->request_only_if_cached) {
+        if ((r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD)
+            || !l1_cache_only_if_cached_delegate(r, ctx))
+        {
             return NGX_HTTP_GATEWAY_TIME_OUT;
         }
+        ctx->only_if_cached_peer_guard = 1;
+    }
+
+    if (!lcf->enabled) {
         return NGX_DECLINED;
     }
 
@@ -1867,9 +2003,6 @@ l1_cache_handler(ngx_http_request_t *r)
         if (l1_cache_request_key(r, &ctx->key) == NGX_OK) {
             ctx->invalidate_after_response = 1;
             ctx->purge_l2_after_response = lcf->purge_l2;
-        }
-        if (ctx->request_only_if_cached) {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
         }
         return NGX_DECLINED;
     }
@@ -1882,7 +2015,8 @@ l1_cache_handler(ngx_http_request_t *r)
     {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
         if (ctx->request_only_if_cached) {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
+            return ctx->only_if_cached_peer_guard ? NGX_DECLINED
+                                                   : NGX_HTTP_GATEWAY_TIME_OUT;
         }
         return NGX_DECLINED;
     }
@@ -1890,14 +2024,17 @@ l1_cache_handler(ngx_http_request_t *r)
     if (l1_cache_request_key(r, &ctx->key) != NGX_OK) {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
         if (ctx->request_only_if_cached) {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
+            return ctx->only_if_cached_peer_guard ? NGX_DECLINED
+                                                   : NGX_HTTP_GATEWAY_TIME_OUT;
         }
         return NGX_DECLINED;
     }
     ctx->lookup = 1;
 
     rc = l1_cache_lookup(r, &ctx->key);
-    if (rc == NGX_DECLINED && ctx->request_only_if_cached) {
+    if (rc == NGX_DECLINED && ctx->request_only_if_cached
+        && !ctx->only_if_cached_peer_guard)
+    {
         return NGX_HTTP_GATEWAY_TIME_OUT;
     }
     return rc;
@@ -3332,6 +3469,10 @@ l1_cache_admit_response(ngx_http_request_t *r,
 static ngx_int_t
 l1_cache_header_filter(ngx_http_request_t *r)
 {
+    static u_char only_if_cached_body[] =
+        "<html>\r\n<head><title>504 Gateway Time-out</title></head>\r\n"
+        "<body>\r\n<center><h1>504 Gateway Time-out</h1></center>\r\n"
+        "<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
     ngx_http_l1_cache_ctx_t *ctx;
     ngx_http_l1_cache_loc_conf_t *lcf;
     ngx_int_t rc;
@@ -3340,11 +3481,50 @@ l1_cache_header_filter(ngx_http_request_t *r)
     const char *cache_status;
     size_t cache_status_len;
     ngx_uint_t l2_status;
+    ngx_buf_t *b;
+    ngx_chain_t *cl;
+    size_t body_len;
+    u_char *body;
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
     if (ctx != NULL && ctx->hit) {
         return l1_cache_next_header_filter(r);
+    }
+
+    if (ctx != NULL && ctx->only_if_cached_peer_blocked
+        && r->headers_out.status == NGX_HTTP_INTERNAL_SERVER_ERROR)
+    {
+        r->headers_out.status = NGX_HTTP_GATEWAY_TIME_OUT;
+        r->headers_out.status_line.len = 0;
+
+        body_len = sizeof(only_if_cached_body) - 1;
+        body = ngx_pnalloc(r->pool, body_len);
+        b = ngx_calloc_buf(r->pool);
+        cl = ngx_alloc_chain_link(r->pool);
+
+        if (body != NULL && b != NULL && cl != NULL) {
+            ngx_memcpy(body, only_if_cached_body, body_len);
+            b->pos = body;
+            b->last = body + body_len;
+            b->memory = 1;
+            b->last_buf = (r == r->main);
+            b->last_in_chain = 1;
+            cl->buf = b;
+            cl->next = NULL;
+            ctx->only_if_cached_body = body;
+            ctx->only_if_cached_body_len = body_len;
+            ctx->only_if_cached_chain = cl;
+            r->headers_out.content_length = NULL;
+            r->headers_out.content_length_n = body_len;
+        } else {
+            /*
+             * What: Return a bodyless 504 if request-pool allocation fails.
+             * Why: Never expose the upstream's internal 500 page as a 504.
+             */
+            r->headers_out.content_length = NULL;
+            r->headers_out.content_length_n = 0;
+        }
     }
 
     slice_value = l1_cache_slice_range(r);
@@ -3362,8 +3542,10 @@ l1_cache_header_filter(ngx_http_request_t *r)
         {
             ctx->l2_miss = 1;
             (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->l2_misses, 1);
-            (void) ngx_atomic_fetch_add(
-                &l1_cache_conf->sh->origin_requests, 1);
+            if (!ctx->only_if_cached_peer_blocked) {
+                (void) ngx_atomic_fetch_add(
+                    &l1_cache_conf->sh->origin_requests, 1);
+            }
         }
     }
 
@@ -3456,10 +3638,22 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     size_t n;
     ngx_uint_t complete;
 
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->only_if_cached_peer_blocked) {
+        if (ctx->only_if_cached_chain != NULL
+            && !ctx->only_if_cached_body_replaced && !r->header_only)
+        {
+            ctx->only_if_cached_body_replaced = 1;
+            return l1_cache_next_body_filter(r, ctx->only_if_cached_chain);
+        }
+
+        return NGX_OK;
+    }
+
     if (r != r->main && !l1_cache_is_slice_subrequest(r)) {
         return l1_cache_next_body_filter(r, in);
     }
-    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+
     if (ctx == NULL || !ctx->admit || ctx->complete) {
         return l1_cache_next_body_filter(r, in);
     }
