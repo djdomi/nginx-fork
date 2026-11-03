@@ -266,9 +266,21 @@ war bereits erfolgreich (504, null Origin-Anfragen). Die Force-`no-store`
 Verifikation wurde anschließend mit identischen Requests gezielt erfolgreich
 abgeschlossen.
 
-## NGINX-Kernänderungen im Arbeitsbranch
+## NGINX-Kernänderungen und endgültiger PR-Umfang
 
-`git diff master...HEAD -- src` zeigt aktuell 14 geänderte Kerndateien. Der dynamische Modulbuild und die Laufzeitprüfung oben belegen, dass die folgenden Fork-Erweiterungen keine Voraussetzung für das installierte Modul sind. Das Modul verwendet jedoch private NGINX-Strukturen (`ngx_http_cache_t`, Proxy-Loc-Conf und Upstream-Status); deshalb ist das Paket exakt an die NGINX-Version und ABI gebunden.
+Die nachfolgende Tabelle dokumentiert die historische Klassifizierung der
+Kernänderungen im vorherigen Arbeitsstand. Commit `1319b4c251600e56e7f39639d4660f542225bb9d`
+stellt alle 14 damals geänderten `src/`-Dateien auf `origin/master` zurück.
+Der aktuelle PR enthält daher keine Änderungen unter `src/` (`git diff
+origin/master...HEAD -- src/` ist leer). Die unabhängigen Core-Korrekturen sind
+nicht Bestandteil dieses Modul-PRs. Der installierte dynamische Modulpfad
+wurde zuvor gegen Stock-Alpine-NGINX 1.30.6-r0 gebaut und ausgeführt; diese
+reine Quellbereichsbereinigung änderte weder Modulquelle noch APK, daher wurden
+die erfolgreichen Laufzeitnachweise nicht wiederholt.
+
+Das Modul verwendet weiterhin private NGINX-Strukturen
+(`ngx_http_cache_t`, Proxy-Loc-Conf und Upstream-Status); deshalb ist das Paket
+an die geprüfte NGINX-Version und ABI gebunden.
 
 | Datei | Einordnung für das dynamische Modul |
 |---|---|
@@ -304,7 +316,11 @@ Der ältere Ansatz ist ein technischer Beleg für Filterintegration ohne Core-Ho
 
 ## Paket
 
-Getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r21.apk` (SHA-256
+Aktuelles getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r23.apk`
+(SHA-256 `c8ac76abd5ffc3f417aecc8c37e7cee0fe00e3147d282934c37791f8f44a62e4`).
+Es wurde gegen Alpine `nginx-mod-dev-1.30.6-r0` gebaut und über r22 installiert.
+Die frühere r21-Prüfung bleibt als historischer Nachweis erhalten:
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r21.apk` (SHA-256
 `a7585ed1fe61565d549678bbfca4b713d03069b3b1718e20cde875377db07be3`).
 Der passende öffentliche Signaturschlüssel liegt daneben. Der private
 Buildschlüssel wird nicht ausgeliefert. Der r21-Build wurde gegen die
