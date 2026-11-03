@@ -1834,6 +1834,12 @@ l1_cache_handler(ngx_http_request_t *r)
             }
         }
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
+        /* What: Stop an only-if-cached request on an L1/L2 bypass.
+         * Why: Falling through to the native proxy could contact the origin.
+         */
+        if (ctx->request_only_if_cached) {
+            return NGX_HTTP_GATEWAY_TIME_OUT;
+        }
         return NGX_DECLINED;
     }
 
@@ -1849,6 +1855,9 @@ l1_cache_handler(ngx_http_request_t *r)
     }
 
     if (!lcf->enabled) {
+        if (ctx->request_only_if_cached) {
+            return NGX_HTTP_GATEWAY_TIME_OUT;
+        }
         return NGX_DECLINED;
     }
 
@@ -1858,6 +1867,9 @@ l1_cache_handler(ngx_http_request_t *r)
         if (l1_cache_request_key(r, &ctx->key) == NGX_OK) {
             ctx->invalidate_after_response = 1;
             ctx->purge_l2_after_response = lcf->purge_l2;
+        }
+        if (ctx->request_only_if_cached) {
+            return NGX_HTTP_GATEWAY_TIME_OUT;
         }
         return NGX_DECLINED;
     }
@@ -1877,6 +1889,9 @@ l1_cache_handler(ngx_http_request_t *r)
 
     if (l1_cache_request_key(r, &ctx->key) != NGX_OK) {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
+        if (ctx->request_only_if_cached) {
+            return NGX_HTTP_GATEWAY_TIME_OUT;
+        }
         return NGX_DECLINED;
     }
     ctx->lookup = 1;

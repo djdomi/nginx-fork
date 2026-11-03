@@ -44,14 +44,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r18.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r19.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r18.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r19.apk
 sudo nginx -t
 ```
 
@@ -201,9 +201,10 @@ location and preserves the original URI, arguments, and request headers used
 to compute the cache key. The unsafe request's response is still returned to
 the client. Without that setting, only L1 is invalidated.
 
-For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss or
-bypass, the module currently returns 504 before the native proxy can check L2.
-It therefore does not support an L2-only hit for this request directive.
+For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss,
+disabled L1, or any L1/L2 bypass, the module returns 504 before the native
+proxy can check L2. It therefore does not support an L2-only hit for this
+request directive.
 Combinations with other request cache directives are treated as unsatisfied
 and return 504 in normal mode. Force mode may override cache-policy directives,
 but preserves `only-if-cached` and still returns 504 rather than contacting the
