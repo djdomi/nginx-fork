@@ -34,6 +34,17 @@ required two-line `What:` / `Why:` form with fields at most 60 characters.
 
 `I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the stock-NGINX only-if-cached L2-miss guard, its request-policy owner, existing fork-only request fields, peer-init wrappers, and the older RAM module; searched BEFORE for only-if-cached and peer-init implementations across the repository, stock NGINX 1.30.6 source, and the older module; found the current module guard, fork-only fields in request/upstream code, no matching older-module implementation, and NGINX keepalive's callback wrapper; used the current module handler and peer-init guard for stock NGINX request policy while native proxy cache remains the L2 response owner; consolidated no duplicate within the module and kept the fork-only core path separate because stock NGINX lacks those fields; searched AFTER and found exactly one module peer-init guard for the stock dynamic path. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
+## Pre-search reasoning record (r23)
+
+The next review covers L1 identity against NGINX's configured native L2
+cache. Existing owners are `l1_cache_proxy_config_matches()` and
+`l1_cache_request_key()` for module-side validation and key material, plus
+NGINX's proxy module for the effective `proxy_cache_key` and cache zone. The
+review will search the complete repository, the target stock NGINX proxy
+configuration structures and evaluation path, and the older RAM module for
+equivalent key construction or validation. No parallel key builder or test
+file is planned before that search is complete.
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
