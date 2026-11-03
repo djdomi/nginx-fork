@@ -627,7 +627,6 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     c->error_sec = h->error_sec;
     c->last_modified = h->last_modified;
     c->date = h->date;
-    c->initial_age = h->initial_age;
     c->valid_msec = h->valid_msec;
     c->body_start = h->body_start;
     c->etag.len = h->etag_len;
@@ -901,11 +900,6 @@ ngx_http_file_cache_exists(ngx_http_file_cache_t *cache, ngx_http_cache_t *c)
     }
 
     if (fcn) {
-        if (fcn->purged) {
-            ngx_shmtx_unlock(&cache->shpool->mutex);
-            return NGX_AGAIN;
-        }
-
         ngx_queue_remove(&fcn->queue);
 
         if (c->node == NULL) {
@@ -1336,7 +1330,6 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
     h->error_sec = c->error_sec;
     h->last_modified = c->last_modified;
     h->date = c->date;
-    h->initial_age = c->initial_age;
     h->crc32 = c->crc32;
     h->valid_msec = (u_short) c->valid_msec;
     h->header_start = (u_short) c->header_start;
@@ -1344,9 +1337,7 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
 
     if (c->etag.len <= NGX_HTTP_CACHE_ETAG_LEN) {
         h->etag_len = (u_char) c->etag.len;
-        if (c->etag.len) {
-            ngx_memcpy(h->etag, c->etag.data, c->etag.len);
-        }
+        ngx_memcpy(h->etag, c->etag.data, c->etag.len);
     }
 
     if (c->vary.len) {
@@ -1441,7 +1432,6 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
     ngx_http_cache_t        *c;
     ngx_ext_rename_file_t   ext;
     ngx_http_file_cache_t  *cache;
-    ngx_flag_t              purge_file;
 
     c = r->cache;
 
@@ -1472,7 +1462,6 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
     ext.log = r->connection->log;
 
     rc = ngx_ext_rename_file(&tf->file.name, &c->file.name, &ext);
-    purge_file = 0;
 
     if (rc == NGX_OK) {
 
@@ -1492,47 +1481,19 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
 
     c->node->count--;
     c->node->error = 0;
+    c->node->uniq = uniq;
+    c->node->body_start = c->body_start;
 
-    if (c->node->purged) {
-        cache->sh->size -= c->node->fs_size;
-        c->node->fs_size = 0;
-        c->node->exists = 0;
-        c->node->uniq = 0;
-        c->node->expire = ngx_time();
-        ngx_queue_remove(&c->node->queue);
-        ngx_queue_insert_tail(&cache->sh->queue, &c->node->queue);
-        purge_file = (rc == NGX_OK);
-        rc = NGX_DECLINED;
+    cache->sh->size += fs_size - c->node->fs_size;
+    c->node->fs_size = fs_size;
 
-    } else {
-        c->node->uniq = uniq;
-        c->node->body_start = c->body_start;
-
-        cache->sh->size += fs_size - c->node->fs_size;
-        c->node->fs_size = fs_size;
-
-        if (rc == NGX_OK) {
-            c->node->exists = 1;
-        }
+    if (rc == NGX_OK) {
+        c->node->exists = 1;
     }
 
     c->node->updating = 0;
 
     ngx_shmtx_unlock(&cache->shpool->mutex);
-
-    if (purge_file && ngx_delete_file(c->file.name.data) == NGX_FILE_ERROR) {
-        ngx_log_error(NGX_LOG_CRIT, r->connection->log, ngx_errno,
-                      ngx_delete_file_n " \"%s\" failed after PURGE",
-                      c->file.name.data);
-    }
-
-    if (r->l1_cache_handler != NULL) {
-        (void) r->l1_cache_handler(r,
-                                   rc == NGX_OK
-                                   ? NGX_HTTP_L1_CACHE_L2_STORE_OK
-                                   : NGX_HTTP_L1_CACHE_L2_STORE_ERROR,
-                                   NULL, c->valid_sec);
-    }
 }
 
 
@@ -1633,7 +1594,6 @@ ngx_http_file_cache_update_header(ngx_http_request_t *r)
     h.error_sec = c->error_sec;
     h.last_modified = c->last_modified;
     h.date = c->date;
-    h.initial_age = c->initial_age;
     h.crc32 = c->crc32;
     h.valid_msec = (u_short) c->valid_msec;
     h.header_start = (u_short) c->header_start;
@@ -1739,12 +1699,6 @@ ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf)
     fcn = c->node;
     fcn->count--;
 
-    if (fcn->purged && fcn->count == 0 && !fcn->deleting) {
-        ngx_queue_remove(&fcn->queue);
-        fcn->expire = ngx_time();
-        ngx_queue_insert_tail(&cache->sh->queue, &fcn->queue);
-    }
-
     if (c->updating && fcn->lock_time == c->lock_time) {
         fcn->updating = 0;
     }
@@ -1787,48 +1741,6 @@ ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf)
     if (c->wait_event.timer_set) {
         ngx_del_timer(&c->wait_event);
     }
-}
-
-
-ngx_int_t
-ngx_http_file_cache_purge(ngx_http_request_t *r, ngx_flag_t all)
-{
-    ngx_http_cache_t           *c;
-    ngx_http_file_cache_t      *cache;
-    ngx_http_file_cache_node_t *fcn;
-    ngx_queue_t                *q;
-
-    c = r->cache;
-    if (c == NULL || c->file_cache == NULL) {
-        return NGX_DECLINED;
-    }
-
-    cache = c->file_cache;
-    ngx_shmtx_lock(&cache->shpool->mutex);
-
-    if (all) {
-        for (q = ngx_queue_head(&cache->sh->queue);
-             q != ngx_queue_sentinel(&cache->sh->queue); q = ngx_queue_next(q))
-        {
-            fcn = ngx_queue_data(q, ngx_http_file_cache_node_t, queue);
-            fcn->purged = 1;
-            fcn->valid_sec = 0;
-            fcn->expire = ngx_time();
-        }
-
-    } else {
-        fcn = ngx_http_file_cache_lookup(cache, c->key);
-        if (fcn != NULL) {
-            fcn->purged = 1;
-            fcn->valid_sec = 0;
-            fcn->expire = ngx_time();
-            ngx_queue_remove(&fcn->queue);
-            ngx_queue_insert_tail(&cache->sh->queue, &fcn->queue);
-        }
-    }
-
-    ngx_shmtx_unlock(&cache->shpool->mutex);
-    return NGX_OK;
 }
 
 
@@ -1909,14 +1821,6 @@ ngx_http_file_cache_forced_expire(ngx_http_file_cache_t *cache)
         }
 
         if (fcn->deleting) {
-            wait = 1;
-            break;
-        }
-
-        if (fcn->purged) {
-            ngx_queue_remove(q);
-            fcn->expire = ngx_time();
-            ngx_queue_insert_tail(&cache->sh->queue, q);
             wait = 1;
             break;
         }
@@ -2023,14 +1927,6 @@ ngx_http_file_cache_expire(ngx_http_file_cache_t *cache)
         }
 
         if (fcn->deleting) {
-            wait = 1;
-            break;
-        }
-
-        if (fcn->purged) {
-            ngx_queue_remove(q);
-            fcn->expire = now;
-            ngx_queue_insert_tail(&cache->sh->queue, q);
             wait = 1;
             break;
         }

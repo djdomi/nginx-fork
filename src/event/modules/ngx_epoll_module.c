@@ -452,12 +452,7 @@ ngx_epoll_notify_handler(ngx_event_t *ev)
         }
     }
 
-#if (NGX_HAVE_GCC_ATOMIC)
-    handler = (ngx_event_handler_pt)
-              __atomic_load_n(&ev->data, __ATOMIC_ACQUIRE);
-#else
     handler = ev->data;
-#endif
     handler(ev);
 }
 
@@ -771,11 +766,7 @@ ngx_epoll_notify(ngx_event_handler_pt handler)
 {
     static uint64_t inc = 1;
 
-#if (NGX_HAVE_GCC_ATOMIC)
-    __atomic_store_n(&notify_event.data, (void *) handler, __ATOMIC_RELEASE);
-#else
     notify_event.data = handler;
-#endif
 
     if ((size_t) write(notify_fd, &inc, sizeof(uint64_t)) != sizeof(uint64_t)) {
         ngx_log_error(NGX_LOG_ALERT, notify_event.log, ngx_errno,

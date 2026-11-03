@@ -8,17 +8,11 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
-#if (NGX_OPENSSL)
-#include <openssl/evp.h>
-#endif
 
 
 #if (NGX_HTTP_CACHE)
 static ngx_int_t ngx_http_upstream_cache(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
-static ngx_int_t ngx_http_upstream_cache_l1_key(ngx_http_request_t *r,
-    ngx_str_t *key);
-static ngx_int_t ngx_http_upstream_cache_force_key(ngx_http_request_t *r);
 static ngx_int_t ngx_http_upstream_cache_get(ngx_http_request_t *r,
     ngx_http_upstream_t *u, ngx_http_file_cache_t **cache);
 static ngx_int_t ngx_http_upstream_cache_send(ngx_http_request_t *r,
@@ -33,8 +27,6 @@ static ngx_int_t ngx_http_upstream_cache_last_modified(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_upstream_cache_etag(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
-static time_t ngx_http_upstream_corrected_initial_age(ngx_list_t *headers,
-    time_t response_time, ngx_msec_t response_delay);
 #endif
 
 static void ngx_http_upstream_init_request(ngx_http_request_t *r);
@@ -66,8 +58,6 @@ static ngx_int_t ngx_http_upstream_intercept_errors(ngx_http_request_t *r,
 static ngx_int_t ngx_http_upstream_test_connect(ngx_connection_t *c);
 static ngx_int_t ngx_http_upstream_process_headers(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
-static ngx_int_t ngx_http_upstream_header_nominated(ngx_http_upstream_t *u,
-    ngx_table_elt_t *h);
 static ngx_int_t ngx_http_upstream_process_trailers(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
 static void ngx_http_upstream_send_response(ngx_http_request_t *r,
@@ -129,10 +119,6 @@ static ngx_int_t
 #if (NGX_HTTP_CACHE)
 static ngx_int_t ngx_http_upstream_process_delta_seconds(u_char *p,
     u_char *last);
-static ngx_flag_t ngx_http_upstream_cache_control_restrictive(ngx_str_t *value);
-static ngx_uint_t ngx_http_upstream_cache_control_token_char(u_char c);
-static ngx_int_t ngx_http_upstream_cache_control_directive(ngx_str_t *value,
-    const char *name, size_t name_len, ngx_str_t *argument);
 #endif
 static ngx_int_t ngx_http_upstream_ignore_header_line(ngx_http_request_t *r,
     ngx_table_elt_t *h, ngx_uint_t offset);
@@ -623,14 +609,6 @@ ngx_http_upstream_init_request(ngx_http_request_t *r)
 
 #if (NGX_HTTP_CACHE)
 
-    if (!u->conf->cache && !r->l1_cache_force
-        && (r->main->l1_cache_request_only_if_cached
-            || r->l1_cache_request_only_if_cached))
-    {
-        ngx_http_finalize_request(r, NGX_HTTP_GATEWAY_TIME_OUT);
-        return;
-    }
-
     if (u->conf->cache) {
         ngx_int_t  rc;
 
@@ -638,10 +616,6 @@ ngx_http_upstream_init_request(ngx_http_request_t *r)
 
         if (rc == NGX_BUSY) {
             r->write_event_handler = ngx_http_upstream_init_request;
-            return;
-        }
-
-        if (rc == NGX_DONE) {
             return;
         }
 
@@ -897,121 +871,10 @@ found:
 
 #if (NGX_HTTP_CACHE)
 
-static time_t
-ngx_http_upstream_corrected_initial_age(ngx_list_t *headers,
-    time_t response_time, ngx_msec_t response_delay)
-{
-    u_char             *p, *last;
-    ngx_int_t           parsed_date;
-    ngx_list_part_t    *part;
-    ngx_table_elt_t    *h;
-    ngx_uint_t          i, age_seen, date_seen, valid;
-    uint64_t            age_value, corrected_age, delay_seconds, max_age;
-    time_t              date_value, apparent_age;
-
-    age_value = 0;
-    date_value = (time_t) NGX_ERROR;
-    age_seen = 0;
-    date_seen = 0;
-    max_age = (uint64_t) NGX_MAX_INT_T_VALUE;
-
-    part = &headers->part;
-    h = part->elts;
-
-    for ( ;; ) {
-        for (i = 0; i < part->nelts; i++) {
-            if (h[i].hash == 0) {
-                continue;
-            }
-
-            if (!age_seen
-                && h[i].key.len == sizeof("Age") - 1
-                && ngx_strncasecmp(h[i].key.data, (u_char *) "Age",
-                                   sizeof("Age") - 1) == 0)
-            {
-                age_seen = 1;
-                p = h[i].value.data;
-                last = p + h[i].value.len;
-
-                while (last > p && (last[-1] == ' ' || last[-1] == '\t')) {
-                    last--;
-                }
-                while (p < last && (*p == ' ' || *p == '\t')) {
-                    p++;
-                }
-                while (p < last && *p != ',') {
-                    p++;
-                }
-                last = p;
-                p = h[i].value.data;
-                while (p < last && (*p == ' ' || *p == '\t')) {
-                    p++;
-                }
-                while (last > p && (last[-1] == ' ' || last[-1] == '\t')) {
-                    last--;
-                }
-
-                valid = p < last;
-                age_value = 0;
-                for ( ; p < last; p++) {
-                    if (*p < '0' || *p > '9') {
-                        valid = 0;
-                        break;
-                    }
-                    if (age_value > (max_age - (*p - '0')) / 10) {
-                        age_value = max_age;
-                    } else {
-                        age_value = age_value * 10 + (*p - '0');
-                    }
-                }
-                if (!valid) {
-                    age_value = 0;
-                }
-
-            } else if (!date_seen
-                       && h[i].key.len == sizeof("Date") - 1
-                       && ngx_strncasecmp(h[i].key.data, (u_char *) "Date",
-                                          sizeof("Date") - 1) == 0)
-            {
-                date_seen = 1;
-                parsed_date = ngx_parse_http_time(h[i].value.data,
-                                                  h[i].value.len);
-                if (parsed_date != NGX_ERROR) {
-                    date_value = parsed_date;
-                }
-            }
-        }
-
-        if (part->next == NULL) {
-            break;
-        }
-
-        part = part->next;
-        h = part->elts;
-    }
-
-    delay_seconds = response_delay / 1000;
-    if (response_delay % 1000 != 0) {
-        delay_seconds++;
-    }
-
-    corrected_age = delay_seconds > max_age - age_value
-                    ? max_age : age_value + delay_seconds;
-
-    apparent_age = date_value != (time_t) NGX_ERROR
-                   && response_time > date_value
-                   ? response_time - date_value : 0;
-
-    return ngx_max(apparent_age, (time_t) corrected_age);
-}
-
-
 static ngx_int_t
 ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 {
     ngx_int_t               rc;
-    ngx_flag_t              purge;
-    ngx_str_t               key;
     ngx_http_cache_t       *c;
     ngx_http_file_cache_t  *cache;
 
@@ -1019,41 +882,13 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     if (c == NULL) {
 
-        purge = r->l1_cache_handler != NULL
-                && r->method_name.len == sizeof("PURGE") - 1
-                && ngx_strncasecmp(r->method_name.data,
-                                  (u_char *) "PURGE",
-                                  sizeof("PURGE") - 1) == 0;
-
-        if (!(r->method & u->conf->cache_methods) && !purge) {
-            if (r->l1_cache_handler == NULL
-                || (r->method & (NGX_HTTP_GET | NGX_HTTP_HEAD
-                                 | NGX_HTTP_OPTIONS | NGX_HTTP_TRACE)))
-            {
-                return NGX_DECLINED;
-            }
-
-            rc = ngx_http_upstream_cache_get(r, u, &cache);
-            if (rc != NGX_OK || ngx_http_file_cache_new(r) != NGX_OK) {
-                return NGX_DECLINED;
-            }
-
-            r->cache->file_cache = cache;
-            r->cache->body_start = u->conf->buffer_size;
-            r->cache->min_uses = u->conf->cache_min_uses;
-            u->cacheable = 0;
+        if (!(r->method & u->conf->cache_methods)) {
             return NGX_DECLINED;
         }
 
         rc = ngx_http_upstream_cache_get(r, u, &cache);
 
         if (rc != NGX_OK) {
-            if (!r->l1_cache_force
-                && (r->main->l1_cache_request_only_if_cached
-                    || r->l1_cache_request_only_if_cached))
-            {
-                return NGX_HTTP_GATEWAY_TIME_OUT;
-            }
             return rc;
         }
 
@@ -1069,19 +904,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
             return NGX_ERROR;
         }
 
-        if (r->l1_cache_force) {
-            rc = ngx_http_upstream_cache_force_key(r);
-            if (rc != NGX_OK) {
-                u->cache_status = NGX_HTTP_CACHE_BYPASS;
-                if (r->l1_cache_handler != NULL) {
-                    (void) r->l1_cache_handler(r,
-                                               NGX_HTTP_L1_CACHE_L2_BYPASS,
-                                               NULL, 0);
-                }
-                return NGX_DECLINED;
-            }
-        }
-
         /* TODO: add keys */
 
         ngx_http_file_cache_create_key(r);
@@ -1094,12 +916,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
                           ngx_align(r->cache->header_start + 256, 1024));
 
             r->cache = NULL;
-            if (!r->l1_cache_force
-                && (r->main->l1_cache_request_only_if_cached
-                    || r->l1_cache_request_only_if_cached))
-            {
-                return NGX_HTTP_GATEWAY_TIME_OUT;
-            }
             return NGX_DECLINED;
         }
 
@@ -1111,81 +927,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
         c->min_uses = u->conf->cache_min_uses;
         c->file_cache = cache;
 
-        if (purge) {
-            rc = ngx_http_upstream_cache_l1_key(r, &key);
-            if (rc != NGX_OK) {
-                return NGX_DECLINED;
-            }
-
-            return r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_PURGE, &key, 0);
-        }
-
-        /*
-         * What: Honor request Cache-Control and Pragma on the native L2 path.
-         * Why: proxy_cache_bypass is configuration-driven and does not
-         *      implement the RFC request directives by itself.
-         */
-        if (!r->l1_cache_force
-            && (r->main->l1_cache_request_only_if_cached
-                || r->l1_cache_request_only_if_cached)
-            && (r->main->l1_cache_request_bypass
-                || r->l1_cache_request_bypass
-                || r->main->l1_cache_request_no_store
-                || r->l1_cache_request_no_store))
-        {
-            u->cache_status = NGX_HTTP_CACHE_BYPASS;
-            if (r->l1_cache_handler != NULL) {
-                (void) r->l1_cache_handler(r,
-                                           NGX_HTTP_L1_CACHE_L2_BYPASS,
-                                           NULL, 0);
-            }
-            return NGX_HTTP_GATEWAY_TIME_OUT;
-        }
-
-        if (!r->l1_cache_force
-            && (r->main->l1_cache_request_bypass
-                || r->l1_cache_request_bypass))
-        {
-            u->cache_status = NGX_HTTP_CACHE_BYPASS;
-            if (r->main->l1_cache_request_no_store
-                || r->l1_cache_request_no_store)
-            {
-                u->cacheable = 0;
-            }
-            if (r->l1_cache_handler != NULL) {
-                (void) r->l1_cache_handler(r,
-                                           NGX_HTTP_L1_CACHE_L2_BYPASS,
-                                           NULL, 0);
-            }
-            return NGX_DECLINED;
-        }
-
-        /*
-         * What: Disable both cache reads and writes when response policy
-         *       headers are explicitly ignored in a non-forced L1 location.
-         * Why: Existing L2 files were admitted under that relaxed policy and
-         *      cannot be validated before the cache lookup returns them.
-         */
-        if (r->l1_cache_handler != NULL && !r->l1_cache_force
-            && (u->conf->ignore_headers
-                & (NGX_HTTP_UPSTREAM_IGN_XA_EXPIRES
-                   | NGX_HTTP_UPSTREAM_IGN_EXPIRES
-                   | NGX_HTTP_UPSTREAM_IGN_CACHE_CONTROL
-                   | NGX_HTTP_UPSTREAM_IGN_SET_COOKIE
-                   | NGX_HTTP_UPSTREAM_IGN_VARY)))
-        {
-            u->cache_status = NGX_HTTP_CACHE_BYPASS;
-            u->cacheable = 0;
-            (void) r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_L2_BYPASS,
-                                       NULL, 0);
-            if (r->main->l1_cache_request_only_if_cached
-                || r->l1_cache_request_only_if_cached)
-            {
-                return NGX_HTTP_GATEWAY_TIME_OUT;
-            }
-            return NGX_DECLINED;
-        }
-
         switch (ngx_http_test_predicates(r, u->conf->cache_bypass)) {
 
         case NGX_ERROR:
@@ -1193,12 +934,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         case NGX_DECLINED:
             u->cache_status = NGX_HTTP_CACHE_BYPASS;
-            if (!r->l1_cache_force
-                && (r->main->l1_cache_request_only_if_cached
-                    || r->l1_cache_request_only_if_cached))
-            {
-                return NGX_HTTP_GATEWAY_TIME_OUT;
-            }
             return NGX_DECLINED;
 
         default: /* NGX_OK */
@@ -1210,22 +945,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
         c->lock_age = u->conf->cache_lock_age;
 
         u->cache_status = NGX_HTTP_CACHE_MISS;
-
-        if (r->l1_cache_handler != NULL) {
-            if (ngx_http_upstream_cache_l1_key(r, &key) == NGX_OK) {
-                rc = r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_LOOKUP,
-                                         &key, 0);
-
-                if (rc == NGX_DONE) {
-                    return NGX_DONE;
-                }
-
-            } else {
-                (void) r->l1_cache_handler(r,
-                                           NGX_HTTP_L1_CACHE_L2_BYPASS,
-                                           NULL, 0);
-            }
-        }
     }
 
     rc = ngx_http_file_cache_open(r);
@@ -1236,13 +955,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
     switch (rc) {
 
     case NGX_HTTP_CACHE_STALE:
-
-        if (!r->l1_cache_force
-            && (r->main->l1_cache_request_only_if_cached
-                || r->l1_cache_request_only_if_cached))
-        {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
-        }
 
         if (((u->conf->cache_use_stale & NGX_HTTP_UPSTREAM_FT_UPDATING)
              || c->stale_updating) && !r->background
@@ -1262,13 +974,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     case NGX_HTTP_CACHE_UPDATING:
 
-        if (!r->l1_cache_force
-            && (r->main->l1_cache_request_only_if_cached
-                || r->l1_cache_request_only_if_cached))
-        {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
-        }
-
         if (((u->conf->cache_use_stale & NGX_HTTP_UPSTREAM_FT_UPDATING)
              || c->stale_updating) && !r->background)
         {
@@ -1283,33 +988,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     case NGX_OK:
         u->cache_status = NGX_HTTP_CACHE_HIT;
-    }
-
-    if (r->l1_cache_handler != NULL && rc != NGX_AGAIN) {
-        if (rc == NGX_HTTP_CACHE_SCARCE) {
-            (void) r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_L2_BYPASS,
-                                       NULL, 0);
-
-        } else if (u->cache_status == NGX_HTTP_CACHE_HIT) {
-            (void) r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_L2_HIT, NULL,
-                                       c->valid_sec);
-
-        } else if (u->cache_status == NGX_HTTP_CACHE_MISS) {
-            (void) r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_L2_MISS, NULL, 0);
-
-        } else {
-            (void) r->l1_cache_handler(r, NGX_HTTP_L1_CACHE_L2_BYPASS, NULL,
-                                       0);
-        }
-    }
-
-    if (!r->l1_cache_force
-        && (r->main->l1_cache_request_only_if_cached
-            || r->l1_cache_request_only_if_cached)
-        && rc != NGX_AGAIN
-        && (rc != NGX_OK || u->cache_status != NGX_HTTP_CACHE_HIT))
-    {
-        return NGX_HTTP_GATEWAY_TIME_OUT;
     }
 
     switch (rc) {
@@ -1371,221 +1049,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
     r->cached = 0;
 
     return NGX_DECLINED;
-}
-
-
-static ngx_int_t
-ngx_http_upstream_cache_l1_key(ngx_http_request_t *r, ngx_str_t *key)
-{
-    static u_char marker[] = "\0NGINX-L1-CACHE-ZONE-V1\0";
-
-    size_t       len;
-    ngx_uint_t   i;
-    ngx_str_t   *part;
-    ngx_str_t   *zone_name;
-    ngx_array_t *keys;
-    u_char      *p;
-
-    if (r->cache == NULL || r->cache->file_cache == NULL
-        || r->cache->file_cache->shm_zone == NULL)
-    {
-        return NGX_ERROR;
-    }
-
-    zone_name = &r->cache->file_cache->shm_zone->shm.name;
-    if (zone_name->data == NULL || zone_name->len == 0) {
-        return NGX_ERROR;
-    }
-
-    keys = &r->cache->keys;
-    part = keys->elts;
-    len = 0;
-
-    for (i = 0; i < keys->nelts; i++) {
-        if (part[i].len > (size_t) -1 - len) {
-            return NGX_ERROR;
-        }
-
-        len += part[i].len;
-    }
-
-    if (r->l1_cache_key_extra.len > (size_t) -1 - len) {
-        return NGX_ERROR;
-    }
-    len += r->l1_cache_key_extra.len;
-
-    if (len == 0) {
-        return NGX_DECLINED;
-    }
-
-    if (sizeof(marker) - 1 > (size_t) -1 - len
-        || zone_name->len > (size_t) -1 - len - (sizeof(marker) - 1)
-        || (size_t) 1 > (size_t) -1 - len - (sizeof(marker) - 1)
-                              - zone_name->len)
-    {
-        return NGX_ERROR;
-    }
-    len += sizeof(marker) - 1 + zone_name->len + 1;
-
-    key->data = ngx_pnalloc(r->pool, len);
-    if (key->data == NULL) {
-        return NGX_ERROR;
-    }
-
-    p = key->data;
-    p = ngx_copy(p, marker, sizeof(marker) - 1);
-    p = ngx_copy(p, zone_name->data, zone_name->len);
-    *p++ = '\0';
-
-    for (i = 0; i < keys->nelts; i++) {
-        p = ngx_copy(p, part[i].data, part[i].len);
-    }
-
-    if (r->l1_cache_key_extra.len) {
-        p = ngx_copy(p, r->l1_cache_key_extra.data,
-                     r->l1_cache_key_extra.len);
-    }
-
-    key->len = len;
-    return NGX_OK;
-}
-
-
-/* What: Adds a request-header fingerprint to forced cache keys.
- * Why: Forced private/credentialled variants must not share L1 or L2 data.
- */
-static ngx_int_t
-ngx_http_upstream_cache_force_key(ngx_http_request_t *r)
-{
-#if (NGX_OPENSSL)
-    static u_char marker[] = "\0NGINX-L1-FORCE-KEY-V2\0";
-
-    size_t                 len, total, key_len, value_len;
-    ngx_uint_t             i;
-    ngx_list_part_t       *part;
-    ngx_table_elt_t       *header;
-    ngx_str_t             *key;
-    u_char                *p, *extra, digest[32], *component;
-    unsigned int           digest_len;
-
-    if (r->cache == NULL || r->cache->keys.nelts == 0) {
-        return NGX_DECLINED;
-    }
-
-    len = sizeof(marker) - 1;
-    part = &r->headers_in.headers.part;
-    header = part->elts;
-
-    for ( ;; ) {
-        for (i = 0; i < part->nelts; i++) {
-            if (header[i].hash == 0
-                || (header[i].key.len == sizeof("X-L1-Cache-Purge") - 1
-                    && ngx_strncasecmp(header[i].key.data,
-                        (u_char *) "X-L1-Cache-Purge",
-                        sizeof("X-L1-Cache-Purge") - 1) == 0))
-            {
-                continue;
-            }
-
-            key_len = header[i].key.len;
-            value_len = header[i].value.len;
-            if (key_len > UINT32_MAX || value_len > UINT32_MAX
-                || key_len > (size_t) -1 - value_len
-                || key_len + value_len > (size_t) -1 - 8
-                || len > (size_t) -1 - 8 - key_len - value_len)
-            {
-                return NGX_DECLINED;
-            }
-
-            len += 8 + key_len + value_len;
-            if (len > 8192) {
-                return NGX_DECLINED;
-            }
-        }
-
-        if (part->next == NULL) {
-            break;
-        }
-        part = part->next;
-        header = part->elts;
-    }
-
-    extra = ngx_pnalloc(r->pool, len);
-    if (extra == NULL) {
-        return NGX_ERROR;
-    }
-
-    p = ngx_cpymem(extra, marker, sizeof(marker) - 1);
-    part = &r->headers_in.headers.part;
-    header = part->elts;
-
-    for ( ;; ) {
-        for (i = 0; i < part->nelts; i++) {
-            if (header[i].hash == 0
-                || (header[i].key.len == sizeof("X-L1-Cache-Purge") - 1
-                    && ngx_strncasecmp(header[i].key.data,
-                        (u_char *) "X-L1-Cache-Purge",
-                        sizeof("X-L1-Cache-Purge") - 1) == 0))
-            {
-                continue;
-            }
-
-            key_len = header[i].key.len;
-            value_len = header[i].value.len;
-            *p++ = (u_char) (key_len >> 24);
-            *p++ = (u_char) (key_len >> 16);
-            *p++ = (u_char) (key_len >> 8);
-            *p++ = (u_char) key_len;
-            *p++ = (u_char) (value_len >> 24);
-            *p++ = (u_char) (value_len >> 16);
-            *p++ = (u_char) (value_len >> 8);
-            *p++ = (u_char) value_len;
-            ngx_strlow(p, header[i].key.data, key_len);
-            p += key_len;
-            p = ngx_copy(p, header[i].value.data, value_len);
-        }
-
-        if (part->next == NULL) {
-            break;
-        }
-        part = part->next;
-        header = part->elts;
-    }
-
-    r->l1_cache_key_extra.data = extra;
-    r->l1_cache_key_extra.len = len;
-
-    if (EVP_Digest(extra, len, digest, &digest_len, EVP_sha256(), NULL) != 1
-        || digest_len != sizeof(digest))
-    {
-        r->l1_cache_key_extra.data = NULL;
-        r->l1_cache_key_extra.len = 0;
-        return NGX_ERROR;
-    }
-
-    total = sizeof(marker) - 1 + sizeof(digest);
-    component = ngx_pnalloc(r->pool, total);
-    if (component == NULL) {
-        r->l1_cache_key_extra.data = NULL;
-        r->l1_cache_key_extra.len = 0;
-        return NGX_ERROR;
-    }
-    p = ngx_cpymem(component, marker, sizeof(marker) - 1);
-    p = ngx_cpymem(p, digest, sizeof(digest));
-
-    key = ngx_array_push(&r->cache->keys);
-    if (key == NULL) {
-        r->l1_cache_key_extra.data = NULL;
-        r->l1_cache_key_extra.len = 0;
-        return NGX_ERROR;
-    }
-    key->data = component;
-    key->len = total;
-
-    return NGX_OK;
-#else
-    return NGX_DECLINED;
-#endif
 }
 
 
@@ -2139,12 +1602,6 @@ ngx_http_upstream_connect(ngx_http_request_t *r, ngx_http_upstream_t *u)
     u->state->response_time = (ngx_msec_t) -1;
     u->state->connect_time = (ngx_msec_t) -1;
     u->state->header_time = (ngx_msec_t) -1;
-
-    if (r->l1_cache_handler != NULL) {
-        (void) r->l1_cache_handler(r,
-                                   NGX_HTTP_L1_CACHE_ORIGIN_REQUEST,
-                                   NULL, 0);
-    }
 
     rc = ngx_event_connect_peer(&u->peer);
 
@@ -3183,54 +2640,6 @@ done:
         }
     }
 
-#if (NGX_HTTP_CACHE)
-    if (r->cache != NULL && r->l1_cache_handler != NULL
-        && !(r->method & (NGX_HTTP_GET | NGX_HTTP_HEAD
-                          | NGX_HTTP_OPTIONS | NGX_HTTP_TRACE))
-        && u->headers_in.status_n >= NGX_HTTP_OK
-        && u->headers_in.status_n < NGX_HTTP_BAD_REQUEST)
-    {
-        ngx_http_cache_t       *saved_cache;
-        ngx_http_file_cache_t  *file_cache;
-        ngx_str_t               key, method_name;
-        ngx_uint_t              method;
-
-        saved_cache = r->cache;
-        file_cache = saved_cache->file_cache;
-
-        if (file_cache != NULL && ngx_http_file_cache_new(r) == NGX_OK) {
-            r->cache->file_cache = file_cache;
-            r->cache->body_start = u->conf->buffer_size;
-            r->cache->min_uses = u->conf->cache_min_uses;
-
-            method = r->method;
-            method_name = r->method_name;
-            r->method = NGX_HTTP_GET;
-            ngx_str_set(&r->method_name, "GET");
-
-            if (u->create_key(r) == NGX_OK) {
-                ngx_http_file_cache_create_key(r);
-                if (r->l1_cache_force || r->l1_cache_custom_key
-                    || r->l1_cache_slice_enabled)
-                {
-                    (void) ngx_http_file_cache_purge(r, 1);
-                    (void) r->l1_cache_handler(
-                               r, NGX_HTTP_L1_CACHE_INVALIDATE, NULL, 0);
-
-                } else if (ngx_http_upstream_cache_l1_key(r, &key) == NGX_OK) {
-                    (void) ngx_http_file_cache_purge(r, 0);
-                    (void) r->l1_cache_handler(
-                               r, NGX_HTTP_L1_CACHE_INVALIDATE, &key, 0);
-                }
-            }
-
-            r->method = method;
-            r->method_name = method_name;
-            r->cache = saved_cache;
-        }
-    }
-#endif
-
     if (u->peer.notify) {
         u->peer.notify(&u->peer, u->peer.data, NGX_HTTP_UPSTREAM_NOTIFY_HEADER);
     }
@@ -3475,11 +2884,6 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         now = ngx_time();
 
-        r->cache->date = now;
-        r->cache->initial_age = ngx_http_upstream_corrected_initial_age(
-            &u->headers_in.headers, now,
-            u->state ? u->state->header_time : 0);
-
         valid = r->cache->valid_sec;
         updating = r->cache->updating_sec;
         error = r->cache->error_sec;
@@ -3520,6 +2924,8 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
             r->cache->valid_sec = valid;
             r->cache->updating_sec = updating;
             r->cache->error_sec = error;
+
+            r->cache->date = now;
 
             ngx_http_file_cache_update_header(r);
         }
@@ -3681,59 +3087,6 @@ ngx_http_upstream_test_connect(ngx_connection_t *c)
 }
 
 
-/* What: Finds response fields nominated by an upstream Connection field.
- * Why: Intermediaries must remove these hop-by-hop fields before forwarding
- *      or caching the response.
- */
-static ngx_int_t
-ngx_http_upstream_header_nominated(ngx_http_upstream_t *u, ngx_table_elt_t *h)
-{
-    u_char           *p, *last, *start;
-    size_t            len;
-    ngx_table_elt_t  *connection;
-
-    for (connection = u->headers_in.connection;
-         connection != NULL;
-         connection = connection->next)
-    {
-        p = connection->value.data;
-        last = p + connection->value.len;
-
-        while (p < last) {
-            while (p < last && (*p == ' ' || *p == '\t' || *p == ',')) {
-                p++;
-            }
-
-            start = p;
-            while (p < last
-                   && ((*p >= 'a' && *p <= 'z')
-                       || (*p >= 'A' && *p <= 'Z')
-                       || (*p >= '0' && *p <= '9')
-                       || *p == '!' || *p == '#' || *p == '$' || *p == '%'
-                       || *p == '&' || *p == '\'' || *p == '*' || *p == '+'
-                       || *p == '-' || *p == '.' || *p == '^' || *p == '_'
-                       || *p == '`' || *p == '|' || *p == '~'))
-            {
-                p++;
-            }
-
-            len = p - start;
-            if (len != 0 && len == h->key.len
-                && ngx_strncasecmp(start, h->key.data, len) == 0)
-            {
-                return 1;
-            }
-
-            while (p < last && *p != ',') {
-                p++;
-            }
-        }
-    }
-
-    return 0;
-}
-
-
 static ngx_int_t
 ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
 {
@@ -3833,21 +3186,6 @@ ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
             continue;
         }
 
-        /*
-         * What: Preserve Upgrade only for NGINX's active protocol switch.
-         * Why: The proxy terminates and recreates the hop-by-hop handshake
-         *      while transferring the upgraded connection to the client.
-         */
-        if (ngx_http_upstream_header_nominated(u, &h[i])
-            && !(u->upgrade
-                 && h[i].key.len == sizeof("Upgrade") - 1
-                 && ngx_strncasecmp(h[i].key.data, (u_char *) "Upgrade",
-                                    sizeof("Upgrade") - 1) == 0))
-        {
-            h[i].hash = 0;
-            continue;
-        }
-
         if (ngx_hash_find(&u->conf->hide_headers_hash, h[i].hash,
                           h[i].lowcase_key, h[i].key.len))
         {
@@ -3932,10 +3270,6 @@ ngx_http_upstream_process_trailers(ngx_http_request_t *r,
         if (ngx_hash_find(&u->conf->hide_headers_hash, h[i].hash,
                           h[i].lowcase_key, h[i].key.len))
         {
-            continue;
-        }
-
-        if (ngx_http_upstream_header_nominated(u, &h[i])) {
             continue;
         }
 
@@ -4111,20 +3445,7 @@ ngx_http_upstream_send_response(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         now = ngx_time();
 
-        if (r->l1_cache_force
-            && r->l1_cache_ttl != 0
-            && (u->headers_in.status_n == NGX_HTTP_OK
-                || u->headers_in.status_n == NGX_HTTP_PARTIAL_CONTENT))
-        {
-            valid = r->l1_cache_ttl;
-            if (valid > NGX_MAX_INT_T_VALUE - now) {
-                valid = NGX_MAX_INT_T_VALUE - now;
-            }
-            r->cache->valid_sec = now + valid;
-
-        } else {
-            valid = r->cache->valid_sec;
-        }
+        valid = r->cache->valid_sec;
 
         if (valid == 0) {
             valid = ngx_http_file_cache_valid(u->conf->cache_valid,
@@ -4136,9 +3457,6 @@ ngx_http_upstream_send_response(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         if (valid) {
             r->cache->date = now;
-            r->cache->initial_age = ngx_http_upstream_corrected_initial_age(
-                &r->headers_out.headers, now,
-                u->state ? u->state->header_time : 0);
             r->cache->body_start = (u_short) (u->buffer.pos - u->buffer.start);
 
             if (u->headers_in.status_n == NGX_HTTP_OK
@@ -5771,7 +5089,7 @@ ngx_http_upstream_process_set_cookie(ngx_http_request_t *r, ngx_table_elt_t *h,
     h->next = NULL;
 
 #if (NGX_HTTP_CACHE)
-    if (!r->l1_cache_force) {
+    if (!(u->conf->ignore_headers & NGX_HTTP_UPSTREAM_IGN_SET_COOKIE)) {
         u->cacheable = 0;
     }
 #endif
@@ -5786,15 +5104,8 @@ ngx_http_upstream_process_cache_control(ngx_http_request_t *r,
 {
     ngx_table_elt_t      **ph;
     ngx_http_upstream_t   *u;
-#if (NGX_HTTP_CACHE)
-    static const char      s_maxage[] = "s-maxage";
-    static const char      max_age[] = "max-age";
-    static const char      stale_revalidate[] = "stale-while-revalidate";
-    static const char      stale_error[] = "stale-if-error";
-#endif
 
     u = r->upstream;
-    (void) offset;
     ph = &u->headers_in.cache_control;
 
     while (*ph) { ph = &(*ph)->next; }
@@ -5804,22 +5115,10 @@ ngx_http_upstream_process_cache_control(ngx_http_request_t *r,
 
 #if (NGX_HTTP_CACHE)
     {
-    ngx_str_t   argument;
-    ngx_int_t   rc;
+    u_char     *p, *start, *last;
     ngx_int_t   n;
 
-    if (!r->l1_cache_force
-        && ngx_http_upstream_cache_control_restrictive(&h->value))
-    {
-        u->cacheable = 0;
-        return NGX_OK;
-    }
-
     if (u->conf->ignore_headers & NGX_HTTP_UPSTREAM_IGN_CACHE_CONTROL) {
-        return NGX_OK;
-    }
-
-    if (r->l1_cache_force) {
         return NGX_OK;
     }
 
@@ -5827,33 +5126,31 @@ ngx_http_upstream_process_cache_control(ngx_http_request_t *r,
         return NGX_OK;
     }
 
+    start = h->value.data;
+    last = start + h->value.len;
+
     if (r->cache->valid_sec != 0 && u->headers_in.x_accel_expires != NULL) {
         goto extensions;
     }
 
-    if (ngx_http_upstream_cache_control_restrictive(&h->value)) {
+    if (ngx_strlcasestrn(start, last, (u_char *) "no-cache", 8 - 1) != NULL
+        || ngx_strlcasestrn(start, last, (u_char *) "no-store", 8 - 1) != NULL
+        || ngx_strlcasestrn(start, last, (u_char *) "private", 7 - 1) != NULL)
+    {
         u->headers_in.no_cache = 1;
         return NGX_OK;
     }
 
-    rc = ngx_http_upstream_cache_control_directive(&h->value, s_maxage,
-                                                   sizeof(s_maxage) - 1,
-                                                   &argument);
-    if (rc == NGX_DECLINED) {
-        rc = ngx_http_upstream_cache_control_directive(&h->value, max_age,
-                                                       sizeof(max_age) - 1,
-                                                       &argument);
+    p = ngx_strlcasestrn(start, last, (u_char *) "s-maxage=", 9 - 1);
+    offset = 9;
+
+    if (p == NULL) {
+        p = ngx_strlcasestrn(start, last, (u_char *) "max-age=", 8 - 1);
+        offset = 8;
     }
 
-    if (rc == NGX_ERROR || (rc == NGX_OK && argument.len == 0)) {
-        u->cacheable = 0;
-        return NGX_OK;
-    }
-
-    if (rc == NGX_OK) {
-        n = ngx_http_upstream_process_delta_seconds(argument.data,
-                                                     argument.data
-                                                     + argument.len);
+    if (p) {
+        n = ngx_http_upstream_process_delta_seconds(p + offset, last);
 
         if (n == NGX_ERROR) {
             u->cacheable = 0;
@@ -5872,19 +5169,11 @@ ngx_http_upstream_process_cache_control(ngx_http_request_t *r,
 
 extensions:
 
-    rc = ngx_http_upstream_cache_control_directive(&h->value,
-                         stale_revalidate, sizeof(stale_revalidate) - 1,
-                         &argument);
+    p = ngx_strlcasestrn(start, last, (u_char *) "stale-while-revalidate=",
+                         23 - 1);
 
-    if (rc == NGX_ERROR || (rc == NGX_OK && argument.len == 0)) {
-        u->cacheable = 0;
-        return NGX_OK;
-    }
-
-    if (rc == NGX_OK) {
-        n = ngx_http_upstream_process_delta_seconds(argument.data,
-                                                     argument.data
-                                                     + argument.len);
+    if (p) {
+        n = ngx_http_upstream_process_delta_seconds(p + 23, last);
 
         if (n == NGX_ERROR) {
             u->cacheable = 0;
@@ -5895,19 +5184,10 @@ extensions:
         r->cache->error_sec = n;
     }
 
-    rc = ngx_http_upstream_cache_control_directive(&h->value, stale_error,
-                                                   sizeof(stale_error) - 1,
-                                                   &argument);
+    p = ngx_strlcasestrn(start, last, (u_char *) "stale-if-error=", 15 - 1);
 
-    if (rc == NGX_ERROR || (rc == NGX_OK && argument.len == 0)) {
-        u->cacheable = 0;
-        return NGX_OK;
-    }
-
-    if (rc == NGX_OK) {
-        n = ngx_http_upstream_process_delta_seconds(argument.data,
-                                                     argument.data
-                                                     + argument.len);
+    if (p) {
+        n = ngx_http_upstream_process_delta_seconds(p + 15, last);
 
         if (n == NGX_ERROR) {
             u->cacheable = 0;
@@ -5924,238 +5204,6 @@ extensions:
 
 
 #if (NGX_HTTP_CACHE)
-
-static ngx_flag_t
-ngx_http_upstream_cache_control_restrictive(ngx_str_t *value)
-{
-    u_char      *p, *last, *start;
-    size_t       len;
-    ngx_uint_t   restricted, escaped, closed;
-
-    p = value->data;
-    last = p + value->len;
-
-    restricted = 0;
-
-    for ( ;; ) {
-        while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-
-        start = p;
-        while (p < last && ngx_http_upstream_cache_control_token_char(*p)) {
-            p++;
-        }
-
-        len = p - start;
-        if (len == 0) {
-            /* Empty fields, directives and list members are malformed. */
-            return 1;
-        }
-
-        if ((len == sizeof("no-store") - 1
-             && ngx_strncasecmp(start, (u_char *) "no-store", len) == 0)
-            || (len == sizeof("no-cache") - 1
-                && ngx_strncasecmp(start, (u_char *) "no-cache", len) == 0)
-            || (len == sizeof("private") - 1
-                && ngx_strncasecmp(start, (u_char *) "private", len) == 0)
-            || (len == sizeof("must-revalidate") - 1
-                && ngx_strncasecmp(start, (u_char *) "must-revalidate", len)
-                   == 0)
-            || (len == sizeof("proxy-revalidate") - 1
-                && ngx_strncasecmp(start, (u_char *) "proxy-revalidate", len)
-                   == 0))
-        {
-            restricted = 1;
-        }
-
-        while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-
-        if (p < last && *p == '=') {
-            p++;
-            while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-
-            if (p == last) {
-                return 1;
-            }
-
-            if (*p == '"') {
-                p++;
-                escaped = 0;
-                closed = 0;
-
-                while (p < last) {
-                    if (escaped) {
-                        if (*p != '\t' && (*p < 0x20 || *p == 0x7f)) {
-                            return 1;
-                        }
-                        escaped = 0;
-                        p++;
-                        continue;
-                    }
-
-                    if (*p == '\\') {
-                        escaped = 1;
-                        p++;
-                        continue;
-                    }
-
-                    if (*p == '"') {
-                        closed = 1;
-                        p++;
-                        break;
-                    }
-
-                    if (*p != '\t' && (*p < 0x20 || *p == 0x7f)) {
-                        return 1;
-                    }
-
-                    p++;
-                }
-
-                if (!closed) {
-                    return 1;
-                }
-
-            } else {
-                start = p;
-                while (p < last
-                       && ngx_http_upstream_cache_control_token_char(*p))
-                {
-                    p++;
-                }
-
-                if (p == start) {
-                    return 1;
-                }
-            }
-        }
-
-        while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-
-        if (p == last) {
-            return restricted;
-        }
-
-        if (*p++ != ',') {
-            return 1;
-        }
-
-        if (p == last) {
-            return 1;
-        }
-    }
-}
-
-
-static ngx_uint_t
-ngx_http_upstream_cache_control_token_char(u_char c)
-{
-    return (c >= '0' && c <= '9')
-           || (c >= 'A' && c <= 'Z')
-           || (c >= 'a' && c <= 'z')
-           || c == '!' || c == '#' || c == '$' || c == '%' || c == '&'
-           || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.'
-           || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
-}
-
-
-static ngx_int_t
-ngx_http_upstream_cache_control_directive(ngx_str_t *value, const char *name,
-    size_t name_len, ngx_str_t *argument)
-{
-    u_char      *p, *last, *start;
-    size_t       len;
-    ngx_uint_t   quoted, escaped, found, match;
-
-    p = value->data;
-    last = p + value->len;
-    found = 0;
-    argument->data = NULL;
-    argument->len = 0;
-
-    for ( ;; ) {
-        while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-
-        start = p;
-        while (p < last && ngx_http_upstream_cache_control_token_char(*p)) {
-            p++;
-        }
-        len = p - start;
-        if (len == 0) {
-            return NGX_ERROR;
-        }
-
-        match = len == name_len
-                && ngx_strncasecmp(start, (u_char *) name, name_len) == 0;
-
-        if (match) {
-            if (found) {
-                return NGX_ERROR;
-            }
-            found = 1;
-        }
-
-        while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-
-        if (p < last && *p == '=') {
-            p++;
-            while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-            start = p;
-
-            if (p < last && *p == '"') {
-                p++;
-                quoted = 1;
-                escaped = 0;
-
-                while (p < last) {
-                    if (escaped) {
-                        escaped = 0;
-                        p++;
-                        continue;
-                    }
-                    if (*p == '\\') {
-                        escaped = 1;
-                        p++;
-                        continue;
-                    }
-                    if (*p == '"') {
-                        p++;
-                        quoted = 0;
-                        break;
-                    }
-                    p++;
-                }
-
-                if (quoted || escaped) {
-                    return NGX_ERROR;
-                }
-
-            } else {
-                while (p < last
-                       && ngx_http_upstream_cache_control_token_char(*p))
-                {
-                    p++;
-                }
-                if (p == start) {
-                    return NGX_ERROR;
-                }
-            }
-
-            if (match) {
-                argument->data = start;
-                argument->len = p - start;
-            }
-        }
-
-        while (p < last && (*p == ' ' || *p == '\t')) { p++; }
-        if (p == last) {
-            return found ? NGX_OK : NGX_DECLINED;
-        }
-        if (*p++ != ',' || p == last) {
-            return NGX_ERROR;
-        }
-    }
-}
-
 
 static ngx_int_t
 ngx_http_upstream_process_delta_seconds(u_char *p, u_char *last)
@@ -6217,10 +5265,6 @@ ngx_http_upstream_process_expires(ngx_http_request_t *r, ngx_table_elt_t *h,
     time_t  expires;
 
     if (u->conf->ignore_headers & NGX_HTTP_UPSTREAM_IGN_EXPIRES) {
-        return NGX_OK;
-    }
-
-    if (r->l1_cache_force) {
         return NGX_OK;
     }
 
@@ -6508,9 +5552,6 @@ ngx_http_upstream_process_vary(ngx_http_request_t *r,
     ngx_str_t   vary;
 
     if (u->conf->ignore_headers & NGX_HTTP_UPSTREAM_IGN_VARY) {
-        if (!r->l1_cache_force && r->cache != NULL) {
-            u->cacheable = 0;
-        }
         return NGX_OK;
     }
 
@@ -6519,11 +5560,6 @@ ngx_http_upstream_process_vary(ngx_http_request_t *r,
     }
 
     if (h->value.len == 1 && h->value.data[0] == '*') {
-        if (r->l1_cache_force) {
-            /* The forced cache key fingerprints every request header. */
-            return NGX_OK;
-        }
-
         u->cacheable = 0;
         return NGX_OK;
     }
