@@ -99,6 +99,17 @@ native filter path.
 
 `I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified conditional-request semantics, cache admission, Force cache-policy overrides, request-header preservation, and native NGINX precondition filters; searched BEFORE for all four conditional headers, Force/conditional paths, and conditional-header mutation across the repository, stock NGINX 1.30.6 filter/upstream source, and the older RAM module; found one module admission gate that bypasses L1 for conditionals, Force logic that changes policy bits without rewriting validators, native NGINX conditional-response handling, and no conditional owner in the older module; used the existing L1 admission gate for bypass and native NGINX filters for 304/412 semantics; consolidated no duplicate parser or response evaluator; searched AFTER and found no conditional-header removal or second conditional evaluator in the current module. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
+## Pre-search reasoning record (r25)
+
+The next review covers `only-if-cached` with variable `proxy_pass` targets.
+The existing L1 request handler and shared-object lookup own L1 hits; the
+peer-init guard owns origin suppression only where a configured static
+upstream can be identified. The review will inspect every `only-if-cached`
+branch, the module's exact-key and eligibility checks, stock NGINX's variable
+proxy and cache-miss path, and the older RAM module. The intended behavior is
+to allow a valid L1 hit and fail closed on a miss when native delegation is
+not safe. No parallel lookup or test file is planned.
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
