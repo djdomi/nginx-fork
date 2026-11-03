@@ -3524,7 +3524,13 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
 
     now = ngx_time();
     ngx_shmtx_lock(&cache->shpool->mutex);
+    /*
+     * What: Bind the persistence check to this request's exact L2 file.
+     * Why: A purge/replacement can reuse the shared node before this response
+     *      finishes; node existence alone would then bless the old body.
+     */
     ctx->l2_persisted = c->node->exists && c->node->uniq != 0
+                        && c->node->uniq == c->uniq
                         && c->valid_sec > now && !c->purged
                         && (ctx->l2_hit || c->updated);
     if (ctx->l2_persisted) {
