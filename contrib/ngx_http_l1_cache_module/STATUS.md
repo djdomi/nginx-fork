@@ -169,6 +169,9 @@ logged two write errors; the failed L2 write did not create an L1 HIT.
 The r23 APK was built with `abuild -r` against Alpine `nginx-mod-dev-1.30.6-r0`,
 installed over r22, and the real proxy configuration passed `nginx -t`. Its
 SHA-256 is `c8ac76abd5ffc3f417aecc8c37e7cee0fe00e3147d282934c37791f8f44a62e4`.
+The regular system configuration also passed `nginx -t` through the packaged
+`/etc/nginx/modules/50_l1_cache.conf` autoload. NGINX emitted its nonfatal
+`variables_hash` sizing warning for the default configuration.
 The initial test-fixture attempts that stopped before requests because of
 missing `aio threads` configuration, directory permissions, or an unknown
 diagnostic variable are not counted as product passes; the final two runtime
@@ -186,7 +189,7 @@ second cache writer or lookup implementation.
 | Anforderung | Status | Nachweis / Grenze |
 |---|---|---|
 | Dynamischer Build ohne NGINX-Kernänderungen | PASS | `abuild -r` baut das Modul gegen `/usr/src/nginx-1.30.6`; NGINX-Binary bleibt das installierte Alpine-Paket. |
-| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r23.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild und installierte Stock-NGINX-Konfiguration bestanden `nginx -t`. |
+| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r23.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild, echte Proxy-Konfiguration und reguläre Systemkonfiguration bestanden `nginx -t`. Letztere meldet eine nicht fatale `variables_hash`-Warnung. |
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
 | L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Mit r18 lieferte ein langsamer Client noch den alten 8-MiB-L2-Body aus, während der native L2-Schlüssel extern gepurgt und mit einer neuen Origin-Version neu befüllt wurde. Der Folgezugriff war `L1_MISS_L2_HIT` mit dem neuen Body, nicht `L1_HIT` mit dem alten. HTTP: prime/purge/refresh/final jeweils 200; Origin-Anfragen: 2; alter Body SHA-256 `a82389c100e7139972d596d025b5dabf0be38165d61bd93bf609018eda7b38fa`, neuer Body `bbaa115f96618af1795a163c141952220f6402261f03093eecd0488d3584c82a`. |
