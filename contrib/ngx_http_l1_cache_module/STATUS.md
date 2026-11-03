@@ -3,6 +3,16 @@
 Stand: Arbeitsbranch auf Basis `c59350be6`, Alpine x86_64,
 `nginx-1.30.6-r0`, musl.
 
+## Pre-search reasoning record (r22)
+
+The next review covers the `only-if-cached` L2-miss guard and the comments in
+the modified module source. The behavior is owned by the existing
+`l1_cache_handler()` and `l1_cache_upstream_peer_init()` paths; native NGINX
+proxy-cache lookup and response handling remain the L2 owner. The review will
+search the complete module source and repository for duplicate only-if-cached
+guards, then compare peer-init callback use with the target NGINX source and
+the older RAM module. No new owner or test file is planned.
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
