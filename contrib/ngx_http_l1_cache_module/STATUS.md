@@ -8,14 +8,15 @@ Stand: Arbeitsbranch auf Basis `c59350be6`, Alpine x86_64,
 | Anforderung | Status | Nachweis / Grenze |
 |---|---|---|
 | Dynamischer Build ohne NGINX-Kernänderungen | PASS | `abuild -r` baut das Modul gegen `/usr/src/nginx-1.30.6`; NGINX-Binary bleibt das installierte Alpine-Paket. |
-| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r15.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; `nginx -t` erfolgreich. |
+| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r16.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; `nginx -t` erfolgreich. |
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
 | Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt `proxy_cache_key $l1_cache_key` und passende Cache-Zone; falsche Schlüssel/Zonen führen zu L1-BYPASS. |
 | L2-Schreibfehler | PASS | Vorhandener Lauf mit nicht beschreibbarem L2-Verzeichnis: Antwort blieb bytegleich; kein READY-L1-Objekt wurde veröffentlicht. |
 | `proxy_cache_bypass` / `proxy_no_cache` | PASS | r8-Lauf: benutzerdefinierter Bypass ergab `BYPASS`, invalidierte L1; Folgezugriff war `L1_MISS_L2_HIT`. `proxy_no_cache` verhinderte wiederholte L1-Aufnahme. |
 | Force-Preconditions und Isolation | PASS für geprüfte Fälle | Vorhandener Lauf: If-None-Match→304, If-Match→412; Force-Varianten mit Cookie/Vary wurden getrennt. |
-| RFC-9111 Age über persistentem L2 | PASS für geprüften Pfad | Ein Origin-`Age: 5` mit 1,5 s Antwortverzögerung wurde als `Age: 7` ausgegeben und im nativen L2-Header gespeichert. Nach Neustart lieferte L2 `Age: 16`, danach L1 `Age: 17`; alle drei Bodies hatten denselben SHA-256. Der Test lief mit installiertem APK gegen Stock-Alpine-NGINX 1.30.6-r0. Wenn ein einzelnes `Age`-Feld zu kurz oder die Rohzeile nicht eindeutig auffindbar ist, werden L1- und L2-Aufnahme für diese Antwort abgelehnt. |
+| RFC-9111 Age über persistentem L2 | PASS für geprüften Pfad | Ein Origin-`Age: 5` mit 1,5 s Antwortverzögerung wurde als `Age: 7` ausgegeben und im nativen L2-Header gespeichert. Nach Neustart lieferte L2 `Age: 16`, danach L1 `Age: 17`; alle drei Bodies hatten denselben SHA-256. Der Test lief mit installiertem APK gegen Stock-Alpine-NGINX 1.30.6-r0. |
+| Age-Header kann nicht sicher geändert werden | OPEN | Der Code lehnt dann L1- und L2-Aufnahme ab, gibt `BYPASS` aus und gibt die normale Antwort weiter. Der Fehlerpfad ist gebaut, aber nicht gezielt zur Laufzeit geprüft. |
 | Gesamte verbindliche Testmatrix | OPEN | Vorhandene erfolgreiche Nachweise wurden wiederverwendet. Die vollständige Matrix für alle Range-, Fehler-, Konkurrenz-, Reload- und Speicherfälle ist für den aktuellen Paketstand nicht vollständig belegt. |
 
 ## NGINX-Kernänderungen im Arbeitsbranch
@@ -56,7 +57,7 @@ Der ältere Ansatz ist ein technischer Beleg für Filterintegration ohne Core-Ho
 
 ## Paket
 
-Getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r15.apk`.
+Getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r16.apk`.
 Der passende öffentliche Signaturschlüssel liegt daneben. Der private
 Buildschlüssel wird nicht ausgeliefert. Das Paket hängt exakt von
 `nginx=1.30.6-r0` und `nginx-mod-http-cache-purge=1.30.6-r0` ab.

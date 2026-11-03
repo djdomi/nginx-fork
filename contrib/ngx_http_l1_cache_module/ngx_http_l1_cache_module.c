@@ -3382,6 +3382,8 @@ l1_cache_header_filter(ngx_http_request_t *r)
             if (r->upstream != NULL) {
                 r->upstream->cacheable = 0;
             }
+            l1_cache_release_capture(ctx);
+            (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->rejected, 1);
         }
 
         if (l1_cache_set_age_header(r, ctx->initial_age) != NGX_OK) {
@@ -3398,6 +3400,10 @@ l1_cache_header_filter(ngx_http_request_t *r)
         if (ctx != NULL && ctx->error_fallback) {
             cache_status = "ERROR_FALLBACK";
             cache_status_len = sizeof("ERROR_FALLBACK") - 1;
+
+        } else if (ctx != NULL && ctx->age_update_failed) {
+            cache_status = "BYPASS";
+            cache_status_len = sizeof("BYPASS") - 1;
 
         } else if (ctx != NULL && ctx->lookup && ctx->l2_hit) {
             cache_status = "L1_MISS_L2_HIT";
