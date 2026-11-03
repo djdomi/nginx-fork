@@ -43,6 +43,21 @@ module under `/usr/lib/nginx/modules`, and adds an autoload file under
 provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
+A prebuilt package for that exact target is available at
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r18.apk`; its signing key is
+`alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
+install the APK (the configured Alpine repositories must provide the matching
+purge module):
+
+```sh
+sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r18.apk
+sudo nginx -t
+```
+
+This artifact is only compatible with the pinned Alpine x86_64 NGINX package
+version above. For other NGINX package versions, build a matching APK instead.
+
 ## Configuration
 
 ```nginx
