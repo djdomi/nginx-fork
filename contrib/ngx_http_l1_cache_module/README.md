@@ -131,11 +131,16 @@ validates its purge token and invalidates shared-memory objects before handing
 the request to that L2 purge handler. PURGE of `/` invalidates every L1 object;
 the OSS L2 purge module purges the key represented by that request.
 
-`only-if-cached` remains an open limitation for an L2-only hit: stock NGINX
-does not expose a proxy hook that lets this dynamic module observe an L2 miss
-before the native proxy starts an origin request. The module records the
-directive and can serve an L1 hit, but does not claim complete RFC behavior
-for this L2 case.
+`only-if-cached` remains an open limitation for an L2-only hit. In stock NGINX,
+`ngx_http_upstream_cache()` in `src/http/ngx_http_upstream.c` performs the
+cache lookup and continues toward the origin on a miss; it is a static
+function with no dynamic-module callback between those steps.
+`ngx_http_proxy_process_header()` is also static. The exported file-cache
+reader can open an L2 object, but `ngx_http_cache_send()` expects response
+headers to have already been parsed and only sends the cached body. Reusing
+that reader alone therefore does not provide the native proxy's response
+semantics. The module serves an L1 hit and returns 504 on an L1 miss; it does
+not claim complete RFC behavior for an L2-only hit.
 
 The default policy is a conservative RFC-oriented subset. It serves complete
 GET 200 responses and validated native Slice 206 segments; HEAD can reuse
