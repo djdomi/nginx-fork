@@ -79,6 +79,26 @@ or rewriting, inspect the module's L1-hit and Force paths, compare the stock
 NGINX filter flow, and check the older RAM branch. No second conditional
 parser or test file is planned.
 
+## Search and ownership result (r24)
+
+The repository search found no `l1_cache_force_ignore_conditionals()` or
+conditional-header deletion in the current module. `l1_cache_request_allowed()`
+rejects conditional requests from L1 in both normal and Force modes. Force
+changes cache-policy flags but does not rewrite `r->headers_in` validators.
+Force-key fingerprinting includes request headers. The module therefore
+leaves conditional responses to NGINX's native not-modified filter and proxy
+path; the stock filter evaluates `If-Unmodified-Since`, `If-Match`,
+`If-None-Match`, and `If-Modified-Since`. The older RAM module has no matching
+Force or conditional-response owner.
+
+The existing runtime record reports Force `If-None-Match` as 304 and
+`If-Match` as 412, with request variants kept separate. No source change was
+needed for this review; the current code already bypasses L1 for these
+requests. This conclusion is limited to the recorded cases and the inspected
+native filter path.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified conditional-request semantics, cache admission, Force cache-policy overrides, request-header preservation, and native NGINX precondition filters; searched BEFORE for all four conditional headers, Force/conditional paths, and conditional-header mutation across the repository, stock NGINX 1.30.6 filter/upstream source, and the older RAM module; found one module admission gate that bypasses L1 for conditionals, Force logic that changes policy bits without rewriting validators, native NGINX conditional-response handling, and no conditional owner in the older module; used the existing L1 admission gate for bypass and native NGINX filters for 304/412 semantics; consolidated no duplicate parser or response evaluator; searched AFTER and found no conditional-header removal or second conditional evaluator in the current module. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
