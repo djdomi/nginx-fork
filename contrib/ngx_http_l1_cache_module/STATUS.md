@@ -197,6 +197,44 @@ introduced them. No core file will be reset until each hunk is classified and
 the consequence of removal is documented. The intended PR scope is the
 installable module and its package, not an NGINX core fork.
 
+### r26 complete core-diff classification
+
+The current branch differs from `origin/master` in 14 core files, not 15.
+`ngx_http_not_modified_filter_module.c` was changed in the original feature
+commit but has no net diff at the current HEAD. The r23 module's Alpine APK
+was built against the packaged unmodified NGINX 1.30.6 sources, installed with
+the original binary, and exercised through real L1/L2 requests. Thus none of
+the current core hunks is required by the shipped dynamic module.
+
+| Core file | Current hunk responsibility | Classification | PR decision |
+|---|---|---|---|
+| `src/core/ngx_module.h` | Adds ABI signature bit for new request fields | Legacy module bridge only | Remove from module PR |
+| `src/core/ngx_spinlock.c` | Removes racy non-atomic lock reads before CAS | Independent synchronization fix | Exclude; original commit remains in history |
+| `src/core/ngx_thread_pool.c` | Makes thread-pool shutdown handshake atomic | Independent synchronization fix | Exclude; original commit remains in history |
+| `src/event/modules/ngx_epoll_module.c` | Atomically publishes/loads notify handler | Independent synchronization fix | Exclude; original commit remains in history |
+| `src/http/modules/ngx_http_proxy_module.c` | L1 custom-key flag; skips cleared request headers | First hunk module-only; second generic header handling | Remove both from this PR |
+| `src/http/modules/ngx_http_slice_filter_module.c` | L1 slice callbacks/state; validates byte unit, duplicate ranges and endpoint overflow | L1 bridge plus independent Slice validation | Remove both from this PR |
+| `src/http/ngx_http_cache.h` | Adds initial-age format field and native purge API | Legacy L1/L2 integration | Remove from module PR |
+| `src/http/ngx_http_copy_filter_module.c` | Adds an L1-specific in-memory request flag | Legacy module bridge only | Remove from module PR |
+| `src/http/ngx_http_core_module.c` | Copies legacy L1 state into subrequests; records monotonic timing | Legacy module bridge only | Remove from module PR |
+| `src/http/ngx_http_file_cache.c` | Persists custom initial age, adds purged-node API/state and L1 callbacks; guards zero-length ETag copy | Mostly legacy integration; zero-length copy guard is generic | Remove from this PR; document generic hunk separately |
+| `src/http/ngx_http_request.c` | Initializes a custom monotonic request timestamp | Legacy module bridge only | Remove from module PR |
+| `src/http/ngx_http_request.h` | Adds callback, cache state, Slice state and memory-filter fields | Legacy module ABI | Remove from module PR |
+| `src/http/ngx_http_upstream.c` | Adds L1 events, cache-key/Force integration, request policy, Age and purge handling; filters Connection-nominated headers/trailers | Cache bridge is legacy-only; nominated-header filtering is generic HTTP handling | Remove both from this PR |
+| `src/os/unix/ngx_atomic.h` | Makes trylock/unlock atomic | Independent synchronization fix | Exclude; original commit remains in history |
+
+The generic synchronization, zero-length-copy, Slice-validation, cleared-header,
+and Connection-nominated-header corrections are not L1 runtime dependencies.
+They are excluded from this module PR rather than silently folded into the
+module's installation requirements. Their original introducing commit
+`bf7813235` remains in the branch history for explicit follow-up or cherry-pick.
+The module's final owners are its own request handler, filters, and shared
+memory zone; NGINX's existing proxy/file cache remains the L2 owner. A source
+search found no `r->l1_cache_*` accesses or `ngx_http_file_cache_purge()` use
+in the current dynamic module.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the exact question as whether each current core hunk still has an owner in the installable module or is an independent fix; searched BEFORE all 14 core-file diffs, the initial feature commit, native NGINX 1.30.6 cache/proxy/slice/filter paths, and every custom request-field/API reference in the current module; found the legacy callback bridge, several independent synchronization/HTTP fixes, and no dynamic-module references to custom core fields or purge API; preserved module ownership in the dynamic module and native L2 ownership in stock NGINX; no core change was classified as required by r23. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
