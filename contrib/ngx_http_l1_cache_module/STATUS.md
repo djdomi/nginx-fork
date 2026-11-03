@@ -45,6 +45,29 @@ configuration structures and evaluation path, and the older RAM module for
 equivalent key construction or validation. No parallel key builder or test
 file is planned before that search is complete.
 
+## Search and ownership result (r23)
+
+Stock NGINX's proxy module evaluates the configured `plcf->cache_key` complex
+value as the native cache key. The L1 module accepts only the exact
+`proxy_cache_key $l1_cache_key` expression, checks the selected native cache
+zone, evaluates the configured L1 expression once per request, and reuses the
+same bytes from its request context when NGINX asks for `$l1_cache_key`. L1
+adds length-delimited cache-zone and key-ID fields for its own shared index.
+Force mode adds its request-header fingerprint to the shared variable used by
+both layers. The older RAM branch builds a separate key from scheme, host, URI,
+query, Slice range, and selected request headers; that implementation is not
+used by the current module.
+
+The r21 runtime check deliberately configured different expressions:
+`l1_cache_key "$host$uri"` and `proxy_cache_key "$scheme$host$uri"`. Both
+requests returned byte-identical 200 responses, with native L2 status MISS then
+HIT and `X-L1-Hits: 0` on both. Separate logs showed one origin request and two
+proxy requests. NGINX configuration validation passed without warnings. This
+confirms that an unsupported key relationship bypasses L1 while native L2
+continues to work. Tested in `/tmp/l1-key-mismatch-final.LdKZku`.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified L1/L2 cache-key identity, configured proxy_cache_key evaluation, cache-zone selection, request-variant fingerprinting, and the older RAM module's separate key builder; searched BEFORE for proxy_cache_key, l1_cache_key, l1_cache_proxy_config_matches, and l1_cache_request_key across the repository, the stock NGINX 1.30.6 proxy source, and the older RAM module; found the native proxy complex-value evaluator, the module's exact-expression and zone checks, request-cached key bytes, length-delimited L1 namespace, Force fingerprinting, and the older module's independent key construction; used the native proxy cache as L2 identity owner and the existing module variable/check as the single L1 integration owner; consolidated no duplicate in the current module and retained the older branch only as an unshipped alternative; searched AFTER and found one active current-module key validation and construction path plus the native proxy's cache-key evaluator. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
@@ -54,7 +77,7 @@ file is planned before that search is complete.
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
 | L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Mit r18 lieferte ein langsamer Client noch den alten 8-MiB-L2-Body aus, während der native L2-Schlüssel extern gepurgt und mit einer neuen Origin-Version neu befüllt wurde. Der Folgezugriff war `L1_MISS_L2_HIT` mit dem neuen Body, nicht `L1_HIT` mit dem alten. HTTP: prime/purge/refresh/final jeweils 200; Origin-Anfragen: 2; alter Body SHA-256 `a82389c100e7139972d596d025b5dabf0be38165d61bd93bf609018eda7b38fa`, neuer Body `bbaa115f96618af1795a163c141952220f6402261f03093eecd0488d3584c82a`. |
-| Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt `proxy_cache_key $l1_cache_key` und passende Cache-Zone; falsche Schlüssel/Zonen führen zu L1-BYPASS. |
+| Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt exakt `proxy_cache_key $l1_cache_key` und die passende Cache-Zone. Gezielt abweichender Proxy-Key: L2 MISS/HIT, `X-L1-Hits: 0`, bytegleiche Antworten, genau ein Origin-Request; L1 wurde sicher umgangen. |
 | L2-Schreibfehler | PASS | Vorhandener Lauf mit nicht beschreibbarem L2-Verzeichnis: Antwort blieb bytegleich; kein READY-L1-Objekt wurde veröffentlicht. |
 | `proxy_cache_bypass` / `proxy_no_cache` | PASS | r8-Lauf: benutzerdefinierter Bypass ergab `BYPASS`, invalidierte L1; Folgezugriff war `L1_MISS_L2_HIT`. `proxy_no_cache` verhinderte wiederholte L1-Aufnahme. |
 | Force-Preconditions und Isolation | PASS für geprüfte Fälle | Vorhandener Lauf: If-None-Match→304, If-Match→412; Force-Varianten mit Cookie/Vary wurden getrennt. |
