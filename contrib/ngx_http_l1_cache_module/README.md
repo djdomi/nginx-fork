@@ -132,10 +132,13 @@ the request to that L2 purge handler. PURGE of `/` invalidates every L1 object;
 the OSS L2 purge module purges the key represented by that request.
 
 `only-if-cached` remains an open limitation for an L2-only hit. In stock NGINX,
-`ngx_http_upstream_cache()` in `src/http/ngx_http_upstream.c` performs the
-cache lookup and continues toward the origin on a miss; it is a static
-function with no dynamic-module callback between those steps.
-`ngx_http_proxy_process_header()` is also static. The exported file-cache
+the static `ngx_http_proxy_handler()` in
+`src/http/modules/ngx_http_proxy_module.c` synchronously calls
+`ngx_http_upstream_init()`. Its static request path invokes
+`ngx_http_upstream_cache()` and, on a miss, continues directly to peer
+resolution and connection setup. There is no dynamic-module callback between
+the cache result and that origin path. `ngx_http_proxy_process_header()` and
+`ngx_http_upstream_cache_send()` are static as well. The exported file-cache
 reader can open an L2 object, but `ngx_http_cache_send()` expects response
 headers to have already been parsed and only sends the cached body. Reusing
 that reader alone therefore does not provide the native proxy's response
