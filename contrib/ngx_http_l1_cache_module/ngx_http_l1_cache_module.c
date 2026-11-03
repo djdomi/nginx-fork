@@ -203,6 +203,7 @@ typedef struct {
     ngx_uint_t   force:1;
     ngx_uint_t   slice_headers_checked:1;
     ngx_uint_t   age_update_failed:1;
+    ngx_uint_t   l2_revalidated:1;
     ngx_uint_t   request_bypass:1;
     ngx_uint_t   request_no_store:1;
     ngx_uint_t   request_only_if_cached:1;
@@ -1946,7 +1947,8 @@ l1_cache_handler(ngx_http_request_t *r)
                             r, lcf, &cache_bypass))
     {
         if (ctx->request_only_if_cached) {
-            if (cache_bypass
+            if ((r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD)
+                || cache_bypass
                 || !l1_cache_only_if_cached_delegate(r, ctx))
             {
                 return NGX_HTTP_GATEWAY_TIME_OUT;
@@ -1977,16 +1979,20 @@ l1_cache_handler(ngx_http_request_t *r)
     }
 
     if (ctx->request_only_if_cached) {
-        if ((r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD)
-            || !l1_cache_only_if_cached_delegate(r, ctx))
-        {
+        if (r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD) {
             return NGX_HTTP_GATEWAY_TIME_OUT;
         }
-        ctx->only_if_cached_peer_guard = 1;
+        /* What: Guards native misses only for a known static upstream.
+         * Why: Dynamic targets may still have a valid L1 object.
+         */
+        ctx->only_if_cached_peer_guard =
+            l1_cache_only_if_cached_delegate(r, ctx);
     }
 
     if (!lcf->enabled) {
-        return NGX_DECLINED;
+        return ctx->request_only_if_cached
+                   && !ctx->only_if_cached_peer_guard
+               ? NGX_HTTP_GATEWAY_TIME_OUT : NGX_DECLINED;
     }
 
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->requests, 1);
@@ -3523,6 +3529,8 @@ l1_cache_header_filter(ngx_http_request_t *r)
                    || l2_status == NGX_HTTP_CACHE_REVALIDATED)
         {
             ctx->l2_miss = 1;
+            ctx->l2_revalidated =
+                l2_status == NGX_HTTP_CACHE_REVALIDATED;
             (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->l2_misses, 1);
             if (!ctx->only_if_cached_peer_blocked) {
                 (void) ngx_atomic_fetch_add(
@@ -3707,6 +3715,7 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
     ngx_http_cache_t *c;
     ngx_http_file_cache_t *cache;
     time_t now;
+    ngx_uint_t identity_matches;
 
     if (ctx == NULL || ctx->r == NULL || (c = ctx->r->cache) == NULL
         || c->node == NULL || (cache = c->file_cache) == NULL)
@@ -3716,13 +3725,22 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
 
     now = ngx_time();
     ngx_shmtx_lock(&cache->shpool->mutex);
+    /* What: Matches a committed write to its new node generation.
+     * Why: Stock NGINX leaves request uniq at the old value.
+     */
     /* What: Binds publication checking to this request's L2 file.
      * Why: PURGE can reuse the node before the response completes.
      */
+    identity_matches =
+        (ctx->l2_hit && c->uniq != 0 && c->node->uniq == c->uniq)
+        || (ctx->l2_miss && ctx->l2_revalidated && c->uniq != 0
+            && c->node->uniq == c->uniq)
+        || (ctx->l2_miss && !ctx->l2_revalidated && c->updated
+            && c->node->uniq != 0 && c->node->uniq != c->uniq);
     ctx->l2_persisted = c->node->exists && c->node->uniq != 0
-                        && c->node->uniq == c->uniq
+                        && identity_matches
                         && c->valid_sec > now && !c->purged
-                        && (ctx->l2_hit || c->updated);
+                        && (ctx->l2_hit || ctx->l2_revalidated || c->updated);
     if (ctx->l2_persisted) {
         ctx->valid_sec = c->valid_sec;
         if (ctx->expires != 0) {

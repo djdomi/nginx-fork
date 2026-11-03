@@ -44,14 +44,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r21.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r23.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r21.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r23.apk
 sudo nginx -t
 ```
 
@@ -146,14 +146,17 @@ validates its purge token and invalidates shared-memory objects before handing
 the request to that L2 purge handler. PURGE of `/` invalidates every L1 object;
 the OSS L2 purge module purges the key represented by that request.
 
-For `only-if-cached`, the module delegates eligible static proxy-upstream
-requests to NGINX's native cache path. A native L2 hit retains NGINX's normal
-response parsing and headers. On an L2 miss, the module's peer-init guard
-stops the request before origin peer selection and converts the result to
-504. Dynamic `proxy_pass` targets, active `proxy_cache_bypass`, and
-unsupported methods fail closed with 504. The installed r21 package was
-verified after a proxy restart: an L2-only hit returned the byte-identical
-body with `X-Cache: HIT`; an L2 miss returned 504 without an origin request.
+For `only-if-cached`, a valid L1 hit is served before proxy processing,
+including when `proxy_pass` uses variables. For supported static upstreams,
+an L1 miss may continue through NGINX's native L2 cache; a native L2 hit keeps
+NGINX's normal response path, and the peer-init guard stops an L2 miss before
+origin selection and converts it to 504. A variable `proxy_pass` target has
+no safe static peer hook, so an L1 miss returns 504 without starting proxy
+processing. Active `proxy_cache_bypass` and unsupported methods also fail
+closed. The installed r23 package was verified on Stock NGINX 1.30.6: a
+variable-target origin fill produced a byte-identical `L1_HIT`, an uncached
+`only-if-cached` request returned 504 without an origin request, and a failed
+L2 file write did not publish an L1 object.
 
 The default policy is a conservative RFC-oriented subset. It serves complete
 GET 200 responses and validated native Slice 206 segments; HEAD can reuse
@@ -196,14 +199,15 @@ location and preserves the original URI, arguments, and request headers used
 to compute the cache key. The unsafe request's response is still returned to
 the client. Without that setting, only L1 is invalidated.
 
-For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss,
-disabled L1, or any L1/L2 bypass, the module returns 504 before the native
-proxy can check L2. It therefore does not support an L2-only hit for this
-request directive.
-Combinations with other request cache directives are treated as unsatisfied
-and return 504 in normal mode. Force mode may override cache-policy directives,
-but preserves `only-if-cached` and still returns 504 rather than contacting the
-origin on an L1 miss. This L2-only limitation remains open.
+For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss
+with a supported static proxy upstream, NGINX may serve a native L2 hit; the
+module blocks origin selection and returns 504 on an L2 miss. Variable
+`proxy_pass` targets cannot use that static peer guard, so only an L1 hit is
+served and all misses return 504 before proxy processing. Disabled L1,
+active bypasses, and unsupported methods also return 504. Combinations with
+other request cache directives are treated as unsatisfied and return 504 in
+normal mode. Force mode may override cache-policy directives but preserves
+`only-if-cached` and never contacts the origin on an unserved miss.
 
 The module rejects L1 admission for response policies it does not support.
 The native NGINX proxy cache remains the L2 policy owner. Do not set

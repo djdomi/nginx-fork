@@ -141,21 +141,59 @@ distinguish a proven same-file L2 HIT from a successful current write by the
 native node's committed identity and request-local `c->updated` state, while
 rejecting failed replacements where the old node identity remains unchanged.
 
-`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the split between L1 lookup and origin suppression; searched BEFORE for all only-if-cached branches, proxy configuration checks, native variable proxy handling, the older RAM module, and native cache identity updates; found that the handler rejected variable proxy targets before lookup, and that the current persistence check requires equality even though stock NGINX initializes request uniq to zero and commits the file uniq only to the shared node; retained l1_cache_handler as the sole L1 lookup owner, the peer-init hook as the static-origin guard, and l1_cache_update_l2_state as the sole L2 publication verifier; no duplicate lookup or cache writer was added. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+### r25 implementation and targeted runtime evidence
 
-`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the split between L1 lookup and origin suppression; searched BEFORE for all only-if-cached branches, proxy configuration checks, native variable proxy handling, and the older RAM module; found that the handler rejects variable proxy targets before L1 lookup, that the native proxy evaluates dynamic targets after PRECONTENT, and that the older module has no only-if-cached owner; retained l1_cache_handler as the sole L1 lookup owner and the existing peer-init hook as the static-origin guard; no overlapping lookup or guard was added. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+`l1_cache_handler()` now attempts a verified L1 lookup before returning 504
+for an `only-if-cached` request with variable `proxy_pass`. A miss with no
+static peer guard still returns 504 before proxy processing. Unsupported
+methods and mismatched L1/L2 configuration remain fail-closed.
+
+`l1_cache_update_l2_state()` now recognizes three native states: the same
+committed file on L2 HIT, the same file after native 304 revalidation, and a
+newly committed file generation after a completed native write. A write error
+leaves `node->exists` false for a new object or keeps the old identity for a
+replacement, so neither can publish a new L1 object.
+
+Target: installed Alpine `nginx-1.30.6-r0`, unchanged `/usr/sbin/nginx`,
+two workers, package r23. In `/tmp/l1-oic-dynamic-r23`, a variable-target
+origin fill returned 200 `L1_MISS_L2_MISS`; the immediately following
+`only-if-cached` request returned 200 `L1_HIT`, object count 1, hit count 1,
+and a byte-identical body (SHA-256
+`61bc1d0e58b3dcafea891767da07fbf1f43202b3326336b85ae5b5a3939f3b40`). An
+uncached `only-if-cached` key returned 504; the origin log contained only the
+initial fill. In `/tmp/l1-l2-writefail-r23`, the L2 cache directory was made
+unwritable after NGINX startup. Both ordinary requests returned 200, both
+were `L1_MISS_L2_MISS`, the origin log contained two requests, and NGINX
+logged two write errors; the failed L2 write did not create an L1 HIT.
+
+The r23 APK was built with `abuild -r` against Alpine `nginx-mod-dev-1.30.6-r0`,
+installed over r22, and the real proxy configuration passed `nginx -t`. Its
+SHA-256 is `c8ac76abd5ffc3f417aecc8c37e7cee0fe00e3147d282934c37791f8f44a62e4`.
+The initial test-fixture attempts that stopped before requests because of
+missing `aio threads` configuration, directory permissions, or an unknown
+diagnostic variable are not counted as product passes; the final two runtime
+runs above used corrected temporary configurations.
+
+After the code edit, the repository and Stock NGINX source were searched for
+all `l2_persisted`, `l2_revalidated`, cache-node identity comparisons, and
+native file-cache writes. There is one L1/L2 publication verifier and no
+second cache writer or lookup implementation.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified that variable proxy only-if-cached requests must attempt L1 before a fail-closed miss, and that stock NGINX's new-file uniq lives on the shared cache node; searched BEFORE for all handler guards, cache eligibility, native proxy processing, the older module, and file-cache identity writes; found one L1 handler, one static peer guard, and one L2 publication verifier; reused those owners and native cache writes; after editing, searched AFTER all l2_persisted and l2_revalidated paths, cache identity comparisons, and native file-cache writes and found no duplicate cache writer or lookup. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
 |---|---|---|
 | Dynamischer Build ohne NGINX-Kernänderungen | PASS | `abuild -r` baut das Modul gegen `/usr/src/nginx-1.30.6`; NGINX-Binary bleibt das installierte Alpine-Paket. |
-| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r21.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild und installiertes System bestanden `nginx -t`. |
+| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r23.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild und installierte Stock-NGINX-Konfiguration bestanden `nginx -t`. |
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
 | L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Mit r18 lieferte ein langsamer Client noch den alten 8-MiB-L2-Body aus, während der native L2-Schlüssel extern gepurgt und mit einer neuen Origin-Version neu befüllt wurde. Der Folgezugriff war `L1_MISS_L2_HIT` mit dem neuen Body, nicht `L1_HIT` mit dem alten. HTTP: prime/purge/refresh/final jeweils 200; Origin-Anfragen: 2; alter Body SHA-256 `a82389c100e7139972d596d025b5dabf0be38165d61bd93bf609018eda7b38fa`, neuer Body `bbaa115f96618af1795a163c141952220f6402261f03093eecd0488d3584c82a`. |
 | Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt exakt `proxy_cache_key $l1_cache_key` und die passende Cache-Zone. Gezielt abweichender Proxy-Key: L2 MISS/HIT, `X-L1-Hits: 0`, bytegleiche Antworten, genau ein Origin-Request; L1 wurde sicher umgangen. |
-| L2-Schreibfehler | PASS | Vorhandener Lauf mit nicht beschreibbarem L2-Verzeichnis: Antwort blieb bytegleich; kein READY-L1-Objekt wurde veröffentlicht. |
+| L2-Schreibfehler | PASS | r23-Lauf mit nach dem Start schreibgeschütztem L2-Verzeichnis: zwei 200-Antworten blieben `L1_MISS_L2_MISS`, zwei Origin-Requests und zwei native Schreibfehler; kein L1-HIT. |
+| Origin-MISS speichert zuerst L2 und befüllt danach L1 | PASS für getesteten Stock-Pfad | r23 auf unverändertem Alpine NGINX 1.30.6-r0: variabler `proxy_pass`, erfolgreicher L2-MISS und folgender bytegleicher `L1_HIT`; ein ungefüllter `only-if-cached`-Schlüssel lieferte 504 ohne Origin-Request. |
+| `only-if-cached` bei variablem `proxy_pass` | PASS für getesteten Pfad | r23: Variable-Ziel lieferte vorhandenes READY-Objekt als `L1_HIT`; ein L1-MISS gab 504 zurück, bevor die Proxy-Location den Origin startete. |
 | `proxy_cache_bypass` / `proxy_no_cache` | PASS | r8-Lauf: benutzerdefinierter Bypass ergab `BYPASS`, invalidierte L1; Folgezugriff war `L1_MISS_L2_HIT`. `proxy_no_cache` verhinderte wiederholte L1-Aufnahme. |
 | Force-Preconditions und Isolation | PASS für geprüfte Fälle | Vorhandener Lauf: If-None-Match→304, If-Match→412; Force-Varianten mit Cookie/Vary wurden getrennt. |
 | Force mit `only-if-cached` | PASS | Mit installiertem r17 und Force an lieferte ein Request auf leere L1/L2 504; das Origin-Zugriffslog blieb leer. r18 ändert diesen Pfad nicht. |
