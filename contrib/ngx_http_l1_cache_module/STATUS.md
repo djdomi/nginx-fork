@@ -130,6 +130,19 @@ valid L1 hit; a miss remains fail-closed without starting NGINX proxy
 processing. Unsupported methods remain 504. No second lookup or proxy-key
 implementation is needed.
 
+The first real variable-target run exposed a separate prerequisite: an
+origin-filled object was not published to L1. Stock NGINX 1.30.6 initializes
+`ngx_http_cache_t.uniq` to zero for a new cache node, then
+`ngx_http_file_cache_update()` writes the completed file's nonzero identity to
+`c->node->uniq` without copying it back to `c->uniq`. The module currently
+requires those fields to be equal, so its L2-commit check rejects a successful
+new L2 write. The single owner is `l1_cache_update_l2_state()`; it must
+distinguish a proven same-file L2 HIT from a successful current write by the
+native node's committed identity and request-local `c->updated` state, while
+rejecting failed replacements where the old node identity remains unchanged.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the split between L1 lookup and origin suppression; searched BEFORE for all only-if-cached branches, proxy configuration checks, native variable proxy handling, the older RAM module, and native cache identity updates; found that the handler rejected variable proxy targets before lookup, and that the current persistence check requires equality even though stock NGINX initializes request uniq to zero and commits the file uniq only to the shared node; retained l1_cache_handler as the sole L1 lookup owner, the peer-init hook as the static-origin guard, and l1_cache_update_l2_state as the sole L2 publication verifier; no duplicate lookup or cache writer was added. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+
 `I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the split between L1 lookup and origin suppression; searched BEFORE for all only-if-cached branches, proxy configuration checks, native variable proxy handling, and the older RAM module; found that the handler rejects variable proxy targets before L1 lookup, that the native proxy evaluates dynamic targets after PRECONTENT, and that the older module has no only-if-cached owner; retained l1_cache_handler as the sole L1 lookup owner and the existing peer-init hook as the static-origin guard; no overlapping lookup or guard was added. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
 ## Nachweise und Status
