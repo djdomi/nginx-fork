@@ -237,6 +237,8 @@ static ngx_int_t l1_cache_add_status(ngx_http_request_t *r,
 static ngx_table_elt_t *l1_cache_add_header(ngx_http_request_t *r,
     const char *name, size_t name_len, u_char *value, size_t value_len);
 static ngx_int_t l1_cache_set_age_header(ngx_http_request_t *r, time_t age);
+static ngx_int_t l1_cache_persist_initial_age(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx);
 static ngx_int_t l1_cache_update_l2_age(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx);
 static void l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx);
@@ -543,6 +545,7 @@ static ngx_int_t
 l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     uintptr_t data)
 {
+    static u_char cache_key_version[] = "\0L1-NATIVE-AGE-V2\0";
     ngx_http_l1_cache_loc_conf_t *lcf;
     ngx_http_l1_cache_ctx_t *ctx, *main_ctx;
     ngx_list_part_t *part;
@@ -589,6 +592,9 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     }
 
     len = expanded.len;
+    if (l1_cache_size_add(&len, sizeof(cache_key_version) - 1) != NGX_OK) {
+        return NGX_ERROR;
+    }
     if (lcf->force) {
         static u_char marker[] = "\0L1-FORCE-KEY-V1\0";
 
@@ -620,6 +626,7 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     p = ngx_pnalloc(r->pool, len);
     if (p == NULL) return NGX_ERROR;
     if (expanded.len != 0) p = ngx_cpymem(p, expanded.data, expanded.len);
+    p = ngx_cpymem(p, cache_key_version, sizeof(cache_key_version) - 1);
     if (lcf->force) {
         static u_char marker[] = "\0L1-FORCE-KEY-V1\0";
 
@@ -936,13 +943,170 @@ l1_cache_set_age_header(ngx_http_request_t *r, time_t age)
 
 
 static ngx_int_t
+l1_cache_persist_initial_age(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx)
+{
+    ngx_http_upstream_t  *u;
+    ngx_list_part_t      *part;
+    ngx_table_elt_t      *h, *age_header;
+    ngx_uint_t            i, count;
+    u_char               *data, *p, *age_end, *raw, *raw_end;
+    u_char               *line_end, *line_last;
+    u_char               *colon, *raw_value, *raw_value_end, *raw_age;
+    size_t                value_len, raw_age_count;
+    ngx_flag_t            digit_seen;
+
+    if (ctx == NULL || !ctx->admit || ctx->l2_hit || r->upstream == NULL
+        || r->cache == NULL)
+    {
+        return NGX_DECLINED;
+    }
+
+    u = r->upstream;
+    age_header = NULL;
+    count = 0;
+    part = &u->headers_in.headers.part;
+    h = part->elts;
+
+    for ( ;; ) {
+        for (i = 0; i < part->nelts; i++) {
+            if (h[i].hash != 0 && L1_HEADER(h[i], "Age")) {
+                age_header = &h[i];
+                count++;
+            }
+        }
+        if (part->next == NULL) {
+            break;
+        }
+        part = part->next;
+        h = part->elts;
+    }
+
+    if (count == 0) {
+        return NGX_OK;
+    }
+    if (count != 1) {
+        return NGX_DECLINED;
+    }
+
+    p = age_header->value.data;
+    age_end = age_header->value.data + age_header->value.len;
+    digit_seen = 0;
+    while (p < age_end && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    while (p < age_end && *p >= '0' && *p <= '9') {
+        digit_seen = 1;
+        p++;
+    }
+    while (p < age_end && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (!digit_seen || p != age_end) {
+        return NGX_DECLINED;
+    }
+
+    data = ngx_pnalloc(r->pool, NGX_TIME_T_LEN + 1);
+    if (data == NULL) {
+        return NGX_ERROR;
+    }
+    p = ngx_sprintf(data, "%T", ctx->initial_age);
+    value_len = p - data;
+    if (value_len > age_header->value.len) {
+        return NGX_DECLINED;
+    }
+
+    if (u->buffer.start == NULL || u->buffer.pos == NULL
+        || u->buffer.pos < u->buffer.start
+        || r->cache->header_start
+           > (size_t) (u->buffer.pos - u->buffer.start))
+    {
+        return NGX_DECLINED;
+    }
+
+    /*
+     * NGINX copies parsed upstream header values into the request pool.
+     * Locate the corresponding field in the original response buffer, which
+     * is what the native file-cache writer later persists.
+     */
+    raw = u->buffer.start + r->cache->header_start;
+    raw_end = u->buffer.pos;
+    line_end = ngx_strlchr(raw, raw_end, '\n');
+    if (line_end == NULL) {
+        return NGX_DECLINED;
+    }
+    raw = line_end + 1;
+    raw_age = NULL;
+    raw_age_count = 0;
+
+    while (raw < raw_end) {
+        line_end = ngx_strlchr(raw, raw_end, '\n');
+        if (line_end == NULL) {
+            return NGX_DECLINED;
+        }
+
+        line_last = line_end;
+        if (line_last > raw && line_last[-1] == '\r') {
+            line_last--;
+        }
+
+        if (line_last == raw) {
+            break;
+        }
+
+        colon = ngx_strlchr(raw, line_last, ':');
+        if (colon != NULL && colon - raw == 3
+            && ngx_strncasecmp(raw, (u_char *) "age", 3) == 0)
+        {
+            raw_value = colon + 1;
+            while (raw_value < line_last
+                   && (*raw_value == ' ' || *raw_value == '\t'))
+            {
+                raw_value++;
+            }
+
+            raw_value_end = line_last;
+            while (raw_value_end > raw_value
+                   && (raw_value_end[-1] == ' '
+                       || raw_value_end[-1] == '\t'))
+            {
+                raw_value_end--;
+            }
+
+            if ((size_t) (raw_value_end - raw_value)
+                != age_header->value.len
+                || ngx_memcmp(raw_value, age_header->value.data,
+                              age_header->value.len) != 0)
+            {
+                return NGX_DECLINED;
+            }
+
+            raw_age = raw_value;
+            raw_age_count++;
+        }
+
+        raw = line_end + 1;
+    }
+
+    if (raw_age_count != 1) {
+        return NGX_DECLINED;
+    }
+
+    ngx_memset(raw_age, '0', age_header->value.len);
+    ngx_memcpy(raw_age + age_header->value.len - value_len, data, value_len);
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 l1_cache_update_l2_age(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx)
 {
     ngx_list_part_t  *part;
     ngx_table_elt_t  *h;
     ngx_uint_t        i;
-    time_t            now, apparent_age, age, age_value, date;
+    time_t            now, resident, apparent_age, age, age_value, date;
 
     if (ctx == NULL || r->cache == NULL || !r->cached
         || (!ctx->l2_hit
@@ -953,6 +1117,7 @@ l1_cache_update_l2_age(ngx_http_request_t *r,
     }
 
     now = ngx_time();
+    resident = now > r->cache->date ? now - r->cache->date : 0;
     age_value = 0;
     part = &r->headers_out.headers.part;
     h = part->elts;
@@ -975,17 +1140,12 @@ age_found:
                                  r->headers_out.date->value.len)
            : NGX_ERROR;
     apparent_age = date != NGX_ERROR && date < now ? now - date : 0;
-    if (age_value != 0) {
-        /*
-         * Stock NGINX does not persist the origin response delay in its L2
-         * cache metadata.  A nonzero stored Age therefore cannot be advanced
-         * reliably for a later L2 hit.  Keep native L2 behavior, but do not
-         * promote this response into L1 with an unverified age.
-         */
-        ctx->age_update_failed = 1;
-        return NGX_OK;
+    if (age_value > NGX_MAX_INT_T_VALUE - resident) {
+        age_value = NGX_MAX_INT_T_VALUE;
+    } else {
+        age_value += resident;
     }
-    age = apparent_age;
+    age = ngx_max(apparent_age, age_value);
 
     if (l1_cache_set_age_header(r, age) != NGX_OK) {
         ctx->age_update_failed = 1;
@@ -3211,6 +3371,19 @@ l1_cache_header_filter(ngx_http_request_t *r)
     }
 
     if (ctx != NULL && ctx->admit && !ctx->l2_hit && r->cached == 0) {
+        rc = l1_cache_persist_initial_age(r, ctx);
+        if (rc != NGX_OK) {
+            /*
+             * Neither cache may retain an Age value that cannot be updated
+             * safely in the native response buffer.
+             */
+            ctx->age_update_failed = 1;
+            ctx->admit = 0;
+            if (r->upstream != NULL) {
+                r->upstream->cacheable = 0;
+            }
+        }
+
         if (l1_cache_set_age_header(r, ctx->initial_age) != NGX_OK) {
             ctx->age_update_failed = 1;
         }
