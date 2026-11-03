@@ -190,8 +190,9 @@ For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss or
 bypass, the module currently returns 504 before the native proxy can check L2.
 It therefore does not support an L2-only hit for this request directive.
 Combinations with other request cache directives are treated as unsatisfied
-and return 504 in normal mode; force mode deliberately allows the configured
-normal proxy path. This L2-only limitation remains open.
+and return 504 in normal mode. Force mode may override cache-policy directives,
+but preserves `only-if-cached` and still returns 504 rather than contacting the
+origin on an L1 miss. This L2-only limitation remains open.
 
 The module rejects L1 admission for response policies it does not support.
 The native NGINX proxy cache remains the L2 policy owner. Do not set
@@ -214,8 +215,9 @@ new policy. If the raw `Age` field cannot be identified and updated safely,
 the response is forwarded without L1 or L2 admission. A response with no
 `Age` uses `Date` for apparent age.
 
-`l1_cache_force on` on a location overrides request and response cache
-directives, including `no-cache`, `private`, and `no-store`, and uses
+`l1_cache_force on` on a location overrides cache-policy request and response
+directives, including `no-cache`, `private`, and `no-store`, but preserves
+request semantics such as `only-if-cached` and conditional validators. It uses
 the native L2 validity as the upper bound for L1 validity. Set the L2 lifetime
 with NGINX's `proxy_cache_valid`; `l1_cache_ttl` can shorten, but does not
 extend, that lifetime. To make native L2 ignore origin cache-policy headers in

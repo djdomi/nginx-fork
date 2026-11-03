@@ -1809,8 +1809,16 @@ l1_cache_handler(ngx_http_request_t *r)
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     ctx->generation = l1_cache_conf->sh->generation;
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
-    if (!ctx->force) {
-        l1_cache_request_cache_policy(r, ctx);
+    l1_cache_request_cache_policy(r, ctx);
+    if (ctx->force) {
+        /*
+         * What: Force overrides cache-policy directives, but not the
+         *       client's only-if-cached prohibition on contacting an origin.
+         * Why: The latter controls request routing, not cache admission.
+         */
+        ctx->request_bypass = 0;
+        ctx->request_no_store = 0;
+        ctx->request_revalidate = 0;
     }
     ngx_http_set_ctx(r, ctx, ngx_http_l1_cache_module);
 
