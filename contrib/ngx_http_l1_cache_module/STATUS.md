@@ -110,6 +110,28 @@ proxy and cache-miss path, and the older RAM module. The intended behavior is
 to allow a valid L1 hit and fail closed on a miss when native delegation is
 not safe. No parallel lookup or test file is planned.
 
+### r25 pre-change findings
+
+The current handler rejects `only-if-cached` before lookup whenever
+`proxy_pass` uses variables, because `l1_cache_only_if_cached_delegate()`
+requires a static upstream. The normal L1 lookup itself uses the configured
+`$l1_cache_key` and cache-zone checks; it does not need a static proxy target.
+Stock NGINX 1.30.6 evaluates variable `proxy_pass` targets in
+`ngx_http_proxy_handler()` and only reaches upstream selection after the
+PRECONTENT phase. The current static-upstream peer-init guard cannot safely
+guard that dynamic target. The older RAM module has no `only-if-cached`
+handling to reuse.
+
+Planned owner: `l1_cache_handler()` owns the L1 lookup and returns 504 on an
+`only-if-cached` miss unless the existing native peer guard can safely
+delegate. The existing peer-init hook remains the sole owner of suppressing
+origin selection for supported static upstreams. Variable targets may serve a
+valid L1 hit; a miss remains fail-closed without starting NGINX proxy
+processing. Unsupported methods remain 504. No second lookup or proxy-key
+implementation is needed.
+
+`I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the split between L1 lookup and origin suppression; searched BEFORE for all only-if-cached branches, proxy configuration checks, native variable proxy handling, and the older RAM module; found that the handler rejects variable proxy targets before L1 lookup, that the native proxy evaluates dynamic targets after PRECONTENT, and that the older module has no only-if-cached owner; retained l1_cache_handler as the sole L1 lookup owner and the existing peer-init hook as the static-origin guard; no overlapping lookup or guard was added. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
