@@ -5,6 +5,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <ngx_http_cache.h>
+#include <ngx_http_proxy_module.h>
 
 #define L1_HEADER(h, s) \
     ((h).key.len == sizeof(s) - 1 \
@@ -220,6 +221,8 @@ static ngx_int_t l1_cache_stat_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t l1_cache_key_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_flag_t l1_cache_proxy_config_matches(ngx_http_request_t *r,
+    ngx_http_l1_cache_loc_conf_t *lcf);
 static ngx_int_t l1_cache_zone_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t l1_cache_request_policy_variable(ngx_http_request_t *r,
@@ -653,6 +656,45 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
         ctx->proxy_key_ready = 1;
     }
     return NGX_OK;
+}
+
+
+static ngx_flag_t
+l1_cache_proxy_config_matches(ngx_http_request_t *r,
+    ngx_http_l1_cache_loc_conf_t *lcf)
+{
+    static u_char key_variable[] = "$l1_cache_key";
+    ngx_http_proxy_loc_conf_t *plcf;
+    ngx_str_t zone;
+
+    plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
+    if (plcf == NULL || plcf->upstream.cache == 0
+        || plcf->cache_key.value.len != sizeof(key_variable) - 1
+        || ngx_memcmp(plcf->cache_key.value.data, key_variable,
+                      sizeof(key_variable) - 1) != 0)
+    {
+        return 0;
+    }
+
+    if (plcf->upstream.cache_value != NULL) {
+        if (ngx_http_complex_value(r, plcf->upstream.cache_value, &zone)
+            != NGX_OK)
+        {
+            return 0;
+        }
+    } else if (plcf->upstream.cache_zone != NULL) {
+        zone = plcf->upstream.cache_zone->shm.name;
+    } else {
+        return 0;
+    }
+
+    if (zone.len != lcf->l2_zone.len
+        || ngx_memcmp(zone.data, lcf->l2_zone.data, zone.len) != 0)
+    {
+        return 0;
+    }
+
+    return 1;
 }
 
 
@@ -1540,6 +1582,11 @@ l1_cache_handler(ngx_http_request_t *r)
         l1_cache_request_cache_policy(r, ctx);
     }
     ngx_http_set_ctx(r, ctx, ngx_http_l1_cache_module);
+
+    if (lcf->enabled && !l1_cache_proxy_config_matches(r, lcf)) {
+        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
+        return NGX_DECLINED;
+    }
 
     if (r->method_name.len == sizeof(purge_method) - 1
         && ngx_strncasecmp(r->method_name.data, purge_method,

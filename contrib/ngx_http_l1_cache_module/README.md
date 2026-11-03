@@ -20,10 +20,11 @@ make -j4 modules
 The resulting module must be loaded by an ABI-compatible NGINX binary. Verify
 it with `nginx -t` and real requests before deployment. Slice support is a build
 requirement because the module detects slice subrequests and uses `$slice_range`.
-The module reads NGINX's private `ngx_http_cache_t` and upstream cache-status
-fields to validate native L2 publication. Those structures are not a stable
-public ABI; the Alpine APK therefore depends on the exact matching NGINX
-package version and is built from that version's `nginx-mod-dev` source.
+The module reads NGINX's private `ngx_http_cache_t`, upstream cache-status,
+and proxy location-configuration fields to validate native L2 publication,
+cache-key expression, and cache-zone selection. Those structures are not a
+stable public ABI; the Alpine APK therefore depends on the exact matching
+NGINX package version and is built from that version's `nginx-mod-dev` source.
 
 ## Alpine APK
 
@@ -116,7 +117,10 @@ selects the origin. L1 additionally scopes the value by
 the zone name and `l1_cache_key_id`. In force mode, the variable appends a
 length-delimited fingerprint of request headers so the explicit override does
 not merge credential or representation variants. Include `$slice_range` in
-the expression when using the native Slice module.
+the expression when using the native Slice module. At request time, L1 checks
+that the location's effective `proxy_cache_key` is exactly `$l1_cache_key` and
+that its selected `proxy_cache` zone matches `l1_cache_l2_zone`; if either
+check fails, the module bypasses L1 and leaves native proxy handling intact.
 
 The request-policy variables must be connected to the native proxy directives
 as shown above. They apply request `no-cache`, `no-store`, `Pragma`, and
@@ -227,11 +231,11 @@ force mode, conditional validators are preserved and the module bypasses L1 so
 NGINX handles them normally; `Range` and `If-Range` retain their normal NGINX
 semantics. The configured `l1_cache_key` expression is the identity input for
 both L1 and native L2, and must also be used as `proxy_cache_key`. L1 adds the
-configured zone name and `l1_cache_key_id` to its own key. The module cannot
-verify that a location actually applies this expression to `proxy_cache_key`;
-a mismatched configuration can return incorrect objects and is unsupported.
-Include scheme, origin, query, and `$slice_range` as required by the cache
-policy. Full key bytes are compared after the tree-hash lookup.
+configured zone name and `l1_cache_key_id` to its own key. The module verifies
+the effective proxy key expression and zone at request time; a mismatch
+disables L1 for that request. Include scheme, origin, query, and `$slice_range`
+as required by the cache policy. Full key bytes are compared after the
+tree-hash lookup.
 
 ## Squid reference
 
