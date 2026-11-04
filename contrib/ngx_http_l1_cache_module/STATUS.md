@@ -415,5 +415,26 @@ stehen wieder auf r25. Der Lauf ist kein Nachweis für die Produktversion.
 |---|---|---|
 | 100 parallele identische Slice-GETs auf r25 | FAIL | 17/100 vollständige Bodies; 83 abgeschnittene Präfixe; Origin 16 Slice-Requests. |
 | Versuchter r26-Writer-Fix | FAIL, verworfen | 1/100 vollständig; 99 Client-Timeouts nach Teilbody. |
-| Root Cause und dauerhafte Korrektur | OPEN | Der abweichende Fortschritt zwischen nativen Proxy-Slice-Subrequests und direkt aus L1 beantworteten Slice-Subrequests ist noch nicht belastbar isoliert oder behoben. |
-| Konkurrenzabnahme des aktuellen r25 | OPEN | Keine Produktionsfreigabe; ein erneuter Lauf ist erst nach einer nachgewiesenen Codekorrektur sinnvoll. |
+| Root Cause und Korrektur für den 100-Client-Fall | PASS für diesen Fall | Die Korrektur überlässt die Finalisierung eines L1-Hits im Slice-Content-Handler dem NGINX-Core und installiert den Parent-Resume-Wrapper nicht im normalen Proxy-MISS-Pfad. r36 lieferte den zuvor fehlschlagenden 100-Client-Fall vollständig aus. |
+| Breitere Konkurrenzabnahme | OPEN | Der erfolgreiche Lauf deckt genau die dokumentierte Konfiguration ab; weitere parallele Muster und Fehlerpfade sind nicht damit abgenommen. Bereits erfolgreiche Läufe werden nicht wiederholt. |
+
+## r36: gezielte Konkurrenzkorrektur für Slice-L1-Hits
+
+Der Slice-Subrequest-Wrapper ruft den regulären Requestpfad jetzt ausdrücklich
+mit dem Kennzeichen auf, dass NGINX den Content-Handler-Ergebniscode selbst
+finalisiert. Dadurch finalisiert ein direkter L1-Hit den Slice-Subrequest nicht
+zusätzlich selbst. Für L1-Hits wird der wartende Slice-Elternrequest nach
+gepufferter Ausgabe über seinen bisherigen Writer fortgesetzt. Der Proxy-MISS-
+Pfad bleibt beim nativen Handler und erhält keinen L1-Resume-Wrapper.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r36 APK-Build und Installation | PASS | Alpine-Paket `nginx-mod-l1-cache-1.30.6-r36` gebaut und über r35 installiert. |
+| Konfiguration des unveränderten NGINX | PASS | `sudo nginx -t -p /tmp/l1-concurrency-r27/ -c nginx.conf` erfolgreich. Ein unprivilegierter `nginx -t` scheiterte zuvor an Zugriffsrechten auf NGINX-Logs und Runtime-Verzeichnisse; das war kein Konfigurationsfehler. |
+| 100 parallele Slice-GETs | PASS für diesen Lauf | 2 Worker, 100 parallele Clients, Slice 16 KiB, Objekt 262144 Byte. Alle 100 Ergebnisdateien waren vollständig und hatten SHA-256 `30e6369451b7999d37b91cba152ddf6df9f0a0eaf14c72a6e344f23b47c993a8`; 0 curl-Fehler. Die 100 zugehörigen Access-Log-Einträge meldeten `L1_HIT`. |
+| Origin-Verkehr im selben Lauf | EINGESCHRÄNKT | Während des Testintervalls kamen zwei Origin-Einträge hinzu. Der Lauf belegt deshalb keine Aussage, dass alle Requests originfrei bedient wurden; die Bytekorrektheit und vollständige Antwort aller Clients sind jedoch nachgewiesen. |
+| Konkurrenzproblem | PASS für den reproduzierten 100-Client-Fall | Der frühere r25-Lauf lieferte nur 17/100 vollständige Bodies. r36 lieferte in der gleichen Konfiguration 100/100 vollständige Bodies. Dies ist ein gezielter Nachweis für diesen Lastfall, keine vollständige Parallelitäts- oder Dauerabnahme. |
+
+Die Korrektur und dieser einzelne Lauf ersetzen keine übrigen offenen
+Abnahmepunkte. Eine erneute Ausführung dieses bestandenen 100-Client-Laufs ist
+nicht vorgesehen, solange der betreffende Codepfad unverändert bleibt.

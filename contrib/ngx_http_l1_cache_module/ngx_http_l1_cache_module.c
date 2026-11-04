@@ -218,8 +218,10 @@ typedef struct {
     ngx_uint_t   only_if_cached_peer_blocked:1;
     ngx_uint_t   only_if_cached_body_replaced:1;
     ngx_uint_t   capture_finalizer_deferred:1;
+    ngx_uint_t   finalized_by_content_handler:1;
     ngx_pool_cleanup_t *capture_cleanup;
     ngx_http_l1_cache_capture_t *capture;
+    ngx_http_event_handler_pt slice_resume_handler;
 } ngx_http_l1_cache_ctx_t;
 
 static ngx_http_l1_cache_main_conf_t *l1_cache_conf;
@@ -272,8 +274,12 @@ static ngx_int_t l1_cache_start_l2_purge(ngx_http_request_t *r);
 static void l1_cache_invalidate(ngx_str_t *key,
     ngx_http_l1_cache_capture_t *preserve);
 static ngx_int_t l1_cache_handler(ngx_http_request_t *r);
+static ngx_int_t l1_cache_handle_request(ngx_http_request_t *r,
+    ngx_flag_t finalized_by_content_handler);
 static ngx_int_t l1_cache_proxy_content_handler(ngx_http_request_t *r);
 static ngx_int_t l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key);
+static void l1_cache_slice_write_handler(ngx_http_request_t *r);
+static void l1_cache_install_slice_resume(ngx_http_request_t *r);
 static ngx_int_t l1_cache_header_filter(ngx_http_request_t *r);
 static ngx_int_t l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
 static ngx_int_t l1_cache_is_slice_subrequest(ngx_http_request_t *r);
@@ -1948,6 +1954,14 @@ l1_cache_protect_locked(ngx_http_l1_cache_entry_t *entry)
 static ngx_int_t
 l1_cache_handler(ngx_http_request_t *r)
 {
+    return l1_cache_handle_request(r, 0);
+}
+
+
+static ngx_int_t
+l1_cache_handle_request(ngx_http_request_t *r,
+    ngx_flag_t finalized_by_content_handler)
+{
     static u_char purge_method[] = "PURGE";
     ngx_http_l1_cache_loc_conf_t *lcf;
     ngx_http_l1_cache_ctx_t *ctx;
@@ -1973,6 +1987,7 @@ l1_cache_handler(ngx_http_request_t *r)
     }
 
     ctx->r = r;
+    ctx->finalized_by_content_handler = finalized_by_content_handler;
     ctx->force = lcf->enabled && lcf->force;
     /* What: Snapshots the current shared configuration generation.
      * Why: The slab mutex protects concurrent reload updates.
@@ -2097,7 +2112,7 @@ l1_cache_proxy_content_handler(ngx_http_request_t *r)
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
 
     if (lcf->enabled && r != r->main && l1_cache_is_slice_subrequest(r)) {
-        rc = l1_cache_handler(r);
+        rc = l1_cache_handle_request(r, 1);
         if (rc != NGX_DECLINED) {
             return rc;
         }
@@ -2530,16 +2545,43 @@ l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key)
 
     if (r->method == NGX_HTTP_HEAD) {
         rc = ngx_http_send_header(r);
+        if (ctx->finalized_by_content_handler) {
+            return rc;
+        }
         ngx_http_finalize_request(r, rc);
         return NGX_DONE;
     }
     rc = ngx_http_send_header(r);
     if (rc == NGX_ERROR) {
+        if (ctx->finalized_by_content_handler) {
+            return rc;
+        }
         ngx_http_finalize_request(r, rc);
         return NGX_DONE;
     }
     rc = ngx_http_output_filter(r, out);
+    if (slice && rc != NGX_ERROR) {
+        /*
+         * What: Marks an L1-served slice child as waited before finalization.
+         * Why: If output is buffered, NGINX can finalize this child while it
+         *       is inactive; the native Slice filter checks sr->done before
+         *       scheduling the next segment, and WAITED makes that completion
+         *       visible on the inactive finalizer path.
+         */
+        r->waited = 1;
+    }
+    if (ctx->finalized_by_content_handler) {
+        if (slice && rc != NGX_ERROR) {
+            l1_cache_install_slice_resume(r->parent);
+        }
+        return rc;
+    }
     ngx_http_finalize_request(r, rc);
+
+    if (slice && rc != NGX_ERROR) {
+        l1_cache_install_slice_resume(r == r->main ? r : r->parent);
+    }
+
     return NGX_DONE;
 
 rollback:
@@ -2552,6 +2594,75 @@ fallback:
     l1_cache_release_pin(pin);
     l1_cache_mark_error_fallback(ctx);
     return NGX_DECLINED;
+}
+
+
+static void
+l1_cache_install_slice_resume(ngx_http_request_t *r)
+{
+    ngx_http_l1_cache_ctx_t *ctx;
+
+    if (r == NULL || r->done
+        || ngx_http_get_module_ctx(r, ngx_http_slice_filter_module) == NULL)
+    {
+        return;
+    }
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx == NULL || r->write_event_handler == NULL
+        || r->write_event_handler == l1_cache_slice_write_handler)
+    {
+        return;
+    }
+
+    /* What: Resumes the parent after an L1-served slice child completes.
+     * Why: The parent Slice filter is waiting for sr->done and may have no
+     *       upstream event to re-enter its body filter after the child ends.
+     */
+    ctx->slice_resume_handler = r->write_event_handler;
+    r->write_event_handler = l1_cache_slice_write_handler;
+}
+
+
+static void
+l1_cache_slice_write_handler(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+    ngx_http_l1_cache_ctx_t *ctx;
+    ngx_http_event_handler_pt writer;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx == NULL || ctx->slice_resume_handler == NULL)
+    {
+        ngx_http_finalize_request(r, NGX_ERROR);
+        return;
+    }
+
+    writer = ctx->slice_resume_handler;
+    ctx->slice_resume_handler = NULL;
+    r->write_event_handler = writer;
+
+    rc = ngx_http_output_filter(r, NULL);
+    if (rc == NGX_ERROR) {
+        ngx_http_finalize_request(r, rc);
+        return;
+    }
+
+    /*
+     * What: Avoids running the native writer when Slice just posted a child.
+     * Why: Its second output-filter pass would dequeue that child, then the
+     *       writer could finalize the parent before the child response lands.
+     */
+    if (!r->done && r->postponed == NULL
+        && r->write_event_handler == writer)
+    {
+        writer(r);
+    }
+
+    if (!r->done && r->write_event_handler == writer) {
+        ctx->slice_resume_handler = writer;
+        r->write_event_handler = l1_cache_slice_write_handler;
+    }
 }
 
 static ngx_int_t
