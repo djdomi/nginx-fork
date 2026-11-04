@@ -430,7 +430,7 @@ Pfad bleibt beim nativen Handler und erhält keinen L1-Resume-Wrapper.
 
 | Prüfschritt | Ergebnis | Nachweis |
 |---|---|---|
-| r36 APK-Build und Installation | PASS | Alpine-Paket `nginx-mod-l1-cache-1.30.6-r36` gebaut und über r35 installiert. SHA-256 `13a80a1db9eb64f1e60026cbda82ad237e13ced9deab68ffd5fc411c72fd3062`; Abhängigkeiten `nginx=1.30.6-r0`, `nginx-mod-http-cache-purge=1.30.6-r0`, musl x86_64. |
+| r36 APK-Build und Installation | PASS | Alpine-Paket `nginx-mod-l1-cache-1.30.6-r36` gebaut und über r35 installiert. Das signierte Paket liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r36.apk`; `apk verify` meldete `OK`. SHA-256 `13a80a1db9eb64f1e60026cbda82ad237e13ced9deab68ffd5fc411c72fd3062`; Abhängigkeiten `nginx=1.30.6-r0`, `nginx-mod-http-cache-purge=1.30.6-r0`, musl x86_64. |
 | Konfiguration des unveränderten NGINX | PASS | `sudo nginx -t -p /tmp/l1-concurrency-r27/ -c nginx.conf` erfolgreich. Ein unprivilegierter `nginx -t` scheiterte zuvor an Zugriffsrechten auf NGINX-Logs und Runtime-Verzeichnisse; das war kein Konfigurationsfehler. |
 | 100 parallele Slice-GETs | PASS für diesen Lauf | 2 Worker, 100 parallele Clients, Slice 16 KiB, Objekt 262144 Byte. Alle 100 Ergebnisdateien waren vollständig und hatten SHA-256 `30e6369451b7999d37b91cba152ddf6df9f0a0eaf14c72a6e344f23b47c993a8`; 0 curl-Fehler. Die 100 zugehörigen Access-Log-Einträge meldeten `L1_HIT`. |
 | Origin-Verkehr im selben Lauf | EINGESCHRÄNKT | Während des Testintervalls kamen zwei Origin-Einträge hinzu. Der Lauf belegt deshalb keine Aussage, dass alle Requests originfrei bedient wurden; die Bytekorrektheit und vollständige Antwort aller Clients sind jedoch nachgewiesen. |
