@@ -698,7 +698,7 @@ umgehen beide Cache-Schichten und lösen einen erneuten nativen PURGE aus.
 | Prüfschritt | Ergebnis | Nachweis |
 |---|---|---|
 | r58 Build, APK und Installation | PASS | Alpine `nginx-mod-dev=1.30.6-r0`; Build, Modulinitialisierung, `apk verify`, Installation über r57 und System-`nginx -t` erfolgreich. SHA-256 `75736b49d74947e9e8df142030d8348c903b64a4db4a7107153152b5b5d03d9e`. |
-| Fehlerhafte Antwort des nativen PURGE-Handlers | OPEN | Der neue Callbackpfad ist kompiliert, aber ein nativer PURGE-Fehler wurde nicht injiziert. |
-| Gesamtstatus Invalidierung und RFC | OPEN | Die bisherige gezielte Subrequest-Erstellungsfehler-Injektion blieb mit r57 erfolgreich; sie prüft nicht den neuen nativen PURGE-Fehlercallback. Die übrigen offenen Punkte bleiben bestehen. |
+| Fehlerhafte Antwort des nativen PURGE-Handlers | PASS für gezielten Lauf | Temporärer Stock-NGINX-Fehler-Injection-Build ließ den ersten nativen PURGE-Retry mit HTTP 500 scheitern. Der Request blieb `BYPASS`; der nächste Request startete den Retry erneut. Danach folgten `BYPASS`, `L1_MISS_L2_MISS` und `L1_MISS_L2_HIT`. Vier Origin-GETs; Bodies aller fünf GET-Antworten bytegleich (SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`). Lauf `/tmp/l1-postcommit-fail.uyr2ct/run6`; Injektion nicht im APK. |
+| Gesamtstatus Invalidierung und RFC | OPEN | Die gezielte Subrequest-Erstellungsfehler-Injektion (r57) und der native PURGE-Fehlercallback (r58) sind nachgewiesen. Worker-Abbruch im Tombstonepfad und weitere Invalidierungs-, RFC- und Konkurrenzfälle bleiben offen. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r58.apk`.
