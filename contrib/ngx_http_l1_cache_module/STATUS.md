@@ -319,19 +319,11 @@ Der ältere Ansatz ist ein technischer Beleg für Filterintegration ohne Core-Ho
 Aktuelles getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r23.apk`
 (SHA-256 `c8ac76abd5ffc3f417aecc8c37e7cee0fe00e3147d282934c37791f8f44a62e4`).
 Es wurde gegen Alpine `nginx-mod-dev-1.30.6-r0` gebaut und über r22 installiert.
-Die frühere r21-Prüfung bleibt als historischer Nachweis erhalten:
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r21.apk` (SHA-256
-`a7585ed1fe61565d549678bbfca4b713d03069b3b1718e20cde875377db07be3`).
 Der passende öffentliche Signaturschlüssel liegt daneben. Der private
-Buildschlüssel wird nicht ausgeliefert. Der r21-Build wurde gegen die
-installierten Alpine-Quellen für NGINX 1.30.6-r0 gebaut und durch `nginx -t`
-geprüft. Das Paket hängt exakt von
+Buildschlüssel wird nicht ausgeliefert. Das Paket hängt exakt von
 `nginx=1.30.6-r0` und `nginx-mod-http-cache-purge=1.30.6-r0` ab.
-Nach Installation des r21-Pakets auf dem vorhandenen Alpine-System war auch
-`sudo nginx -t` erfolgreich. Der gezielte Laufzeittest bestätigte den L2-only
-HIT und 504 ohne Origin-Zugriff bei L2-MISS.
-`apk verify alpine/dist/nginx-mod-l1-cache-1.30.6-r21.apk` meldete `OK` mit
-dem im Repository enthaltenen und auf dem System vertrauenswürdigen Schlüssel.
+Das r23-Paket wurde installiert; die reale Konfiguration und der System-Autoload
+bestanden `nginx -t`. `apk verify` bestätigte die Paketintegrität.
 
 ## Gesamtstatus
 
