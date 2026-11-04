@@ -156,6 +156,10 @@ pass through the L1 token check and the add-on's access rules. PURGE of `/`
 invalidates every L1 object; the OSS L2 purge module purges the key represented
 by that request.
 
+A location with `l1_cache off` still needs same-location L2 purge support if it
+uses the same L1 key and L2 zone as an enabled location. Successful unsafe
+methods there must invalidate the shared entry too.
+
 For `only-if-cached`, a valid L1 hit is served before proxy processing,
 including when `proxy_pass` uses variables. For supported static upstreams,
 an L1 miss may continue through NGINX's native L2 cache; a native L2 hit keeps

@@ -500,4 +500,5 @@ Invalidierung aus.
 |---|---|---|
 | r43 Alpine-Paket | PASS | `NGINX_MOD_PKGREL=43 abuild -r` erfolgreich; Paket gegen Alpine-NGINX 1.30.6-r0 gebaut, installiert und mit `apk verify` bestätigt. SHA-256 `3a3ac2e9d0ce1c3bb7d6c8d812abf3723231af4fd51863770b14c328275a792a`. |
 | POST aus einer `l1_cache off`-Location | PASS für geprüfte Konfiguration | GET in aktivierter Location: L2-MISS; zweiter GET: L1-HIT; POST über getrennte `l1_cache off`-Location mit identischem L1/L2-Key: 204; Folge-GET: L2-MISS. Origin-Log exakt GET/POST/GET; GET-Bodies bytegleich. Stock-NGINX 1.30.6, temporärer Lauf `/tmp/l1-r43-disabled-location-invalidation-20261104a`. |
+| Ablehnung von `l1_cache_l2_purge off` für gemeinsamen Key | PASS | Einmaliger negativer `nginx -t`-Lauf mit `l1_cache_l2_purge off` in der deaktivierten Location wurde wie erwartet abgelehnt: `cannot be disabled for a shared cache key`. |
 | Vollständige Unsafe-Methoden-/Invalidierungsabnahme | OPEN | Geprüft wurden erfolgreiche POST-Antworten in aktivierter und deaktivierter Location. Andere Statuscodes, Methoden und Race-Konstellationen bleiben unbewertet. Bereits bestandene Läufe wurden nicht wiederholt. |
