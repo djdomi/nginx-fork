@@ -393,3 +393,27 @@ vor Slice-Header-Transformation und nach dem Copy-Body-Filter liegen. r25
 behebt dies mit einem Proxy-Content-Handler-Wrapper und zwei geordneten
 Modulregistrierungen. Die Diagnoseausgaben wurden vor dem APK-Build entfernt;
 die obigen Laufzeitnachweise stammen aus dem installierten r25-Artefakt.
+
+## Offener Konkurrenzfehler: 100 gleichzeitige Slice-Downloads
+
+Ein einmaliger Lauf mit 100 parallelen GETs desselben 262144-Byte-Objekts,
+16-KiB-Slices, zwei Workern und `proxy_cache_lock on` schlug mit installiertem
+r25 fehl. Alle 100 Requests erhielten HTTP 200, aber nur 17 Bodies waren
+vollständig und bytegleich; die übrigen 83 endeten an unterschiedlichen
+Positionen zwischen 163384 und 245760 Bytes. Der Origin protokollierte die 16
+erwarteten Slice-Requests. Damit ist die konkurrierende Slice-Auslieferung
+nicht abgenommen.
+
+Ein versuchsweiser r26-Fix, der den nativen Writer nach gepufferten L1-Hits
+erneut aufrief, war ebenfalls fehlerhaft: Nur 1 von 100 Bodies war vollständig;
+99 Clients warteten bis zum 30-Sekunden-Timeout, nachdem sie 131072 oder
+147456 von 262144 Bytes erhalten hatten. Diese Änderung und das r26-Artefakt
+wurden verworfen; Quellcode, installiertes Paket und ausgeliefertes Artefakt
+stehen wieder auf r25. Der Lauf ist kein Nachweis für die Produktversion.
+
+| Prüfschritt | Status | Befund |
+|---|---|---|
+| 100 parallele identische Slice-GETs auf r25 | FAIL | 17/100 vollständige Bodies; 83 abgeschnittene Präfixe; Origin 16 Slice-Requests. |
+| Versuchter r26-Writer-Fix | FAIL, verworfen | 1/100 vollständig; 99 Client-Timeouts nach Teilbody. |
+| Root Cause und dauerhafte Korrektur | OPEN | Der abweichende Fortschritt zwischen nativen Proxy-Slice-Subrequests und direkt aus L1 beantworteten Slice-Subrequests ist noch nicht belastbar isoliert oder behoben. |
+| Konkurrenzabnahme des aktuellen r25 | OPEN | Keine Produktionsfreigabe; ein erneuter Lauf ist erst nach einer nachgewiesenen Codekorrektur sinnvoll. |
