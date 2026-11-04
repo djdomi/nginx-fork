@@ -352,13 +352,13 @@ Der gezielte r24-L2-Schreibfehlerlauf bestätigte HTTP-Weiterleitung ohne L1-Ver
 
 ## Paket
 
-Aktuelles getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r24.apk`
-(SHA-256 `2cb6679ac1b7149a10a18bd22989fe6e4e7881ad43bce0ddd7580db0081becb4`).
-Es wurde gegen Alpine `nginx-mod-dev-1.30.6-r0` gebaut und über r23 installiert.
+Aktuelles getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r25.apk`
+(SHA-256 `8fff13a14ea8d524581e1b86c894cbc17e7f438e027a39f135d7fe10ee40c077`).
+Es wurde gegen Alpine `nginx-mod-dev-1.30.6-r0` gebaut und über r24 installiert.
 Der passende öffentliche Signaturschlüssel liegt daneben. Der private
 Buildschlüssel wird nicht ausgeliefert. Das Paket hängt exakt von
 `nginx=1.30.6-r0` und `nginx-mod-http-cache-purge=1.30.6-r0` ab.
-Das r24-Paket wurde installiert; die reale Konfiguration und der System-Autoload
+Das r25-Paket wurde über r24 installiert; die reale Konfiguration und der System-Autoload
 bestanden `nginx -t`. `apk verify` bestätigte die Paketintegrität.
 
 ## Gesamtstatus
@@ -366,3 +366,23 @@ bestanden `nginx -t`. `apk verify` bestätigte die Paketintegrität.
 **Nicht vollständig abgenommen.** Das Modul ist nachinstallierbar und die
 geprüften L1/L2- und Age-Pfade funktionieren im geprüften Alpine-System. Die
 vollständige verbindliche Abnahmematrix bleibt offen.
+
+
+## r25: Slice-L1-Integration gegen Stock-NGINX
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| Dynamischer Build mit getrennten Filtermodulen | PASS | r25 wurde mit zwei Modulregistrierungen aus derselben dynamischen Bibliothek gebaut. Die Headerregistrierung steht vor dem Slice-Filter; die Bodyregistrierung steht hinter dem Copy-Filter. Die installierte `.so` exportiert `ngx_http_l1_cache_module` und `ngx_http_l1_cache_body_module`. |
+| Slice-Subrequest-Lookup | PASS | NGINX 1.30.6 klont Slice-Anfragen samt Content-Handler und aktuellem Phase-Index. Der Wrapper im konfigurierten Proxy-Content-Handler führt deshalb den L1-Lookup für den Klon aus, bevor der native Proxy-Handler startet. Die native Slice-Validierung bleibt Owner der zusammengesetzten HTTP-Antwort. |
+| Installation und Modulstart | PASS | r25 APK installiert über r24; APK-Signaturprüfung `apk verify ...r25.apk: OK`. Build mit `nginx-mod-dev-1.30.6-r0`; Laufzeitabhängigkeiten `nginx=1.30.6-r0` und `nginx-mod-http-cache-purge=1.30.6-r0`. System-`nginx -t` und temporäre reale Konfiguration mit zwei Workern erfolgreich. |
+| Slice-Kaltlauf und Aufnahme | PASS | Unverändertes Alpine-NGINX 1.30.6-r0, zwei Worker, Slice 16 KiB, Datei 262144 Byte. Kaltlauf war bytegleich zur Quelldatei (SHA-256 `30e6369451b7999d37b91cba152ddf6df9f0a0eaf14c72a6e344f23b47c993a8`); Stats: 16 L1-Objekte, 16 angenommene Segmente, 0 Ablehnungen, 269888 belegte Bytes. |
+| Warmer vollständiger GET ohne L2-Zugriff | PASS | Nach dem Kaltlauf wurde das L2-Verzeichnis für Worker unlesbar gemacht. Vollständiger GET lieferte HTTP 200, `L1_HIT` und denselben SHA-256; kein zusätzlicher Origin-Request. |
+| Nicht ausgerichtete Range aus Slice-L1 | PASS | Bei weiterhin gesperrtem L2 lieferte `Range: bytes=10000-50000` HTTP 206, `Content-Range: bytes 10000-50000/262144`, 40001 bytegleiche Daten und `L1_HIT`. Origin-Log blieb bei 16 Einträgen vor und nach beiden Warmrequests. |
+| Vollständige Abnahme | OPEN | Die Slice-L1-Lücke ist behoben und die gezielte Paketprüfung bestanden. Andere offene Punkte der Gesamtmatrix (Force-Preconditions, RFC-Matrix, Invalidierungs-/Reload-/Konkurrenz- und Speicherfehlerfälle) bleiben offen; daher keine Produktionsfreigabe. |
+
+Der zuvor fehlgeschlagene Slice-L1-Pfad hatte zwei Ursachen: NGINX-Slice-Klone
+erreichen PRECONTENT nicht erneut, und ein einzelner Filter kann nicht zugleich
+vor Slice-Header-Transformation und nach dem Copy-Body-Filter liegen. r25
+behebt dies mit einem Proxy-Content-Handler-Wrapper und zwei geordneten
+Modulregistrierungen. Die Diagnoseausgaben wurden vor dem APK-Build entfernt;
+die obigen Laufzeitnachweise stammen aus dem installierten r25-Artefakt.

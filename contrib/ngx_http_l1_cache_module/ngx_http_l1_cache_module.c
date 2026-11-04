@@ -160,6 +160,7 @@ typedef struct {
     ngx_flag_t purge_l2;
     ngx_str_t l2_zone;
     ngx_http_complex_value_t *key;
+    ngx_http_handler_pt proxy_content_handler;
 } ngx_http_l1_cache_loc_conf_t;
 
 typedef struct {
@@ -231,6 +232,7 @@ static void *l1_cache_create_main_conf(ngx_conf_t *cf);
 static char *l1_cache_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t l1_cache_zone_init(ngx_shm_zone_t *zone, void *data);
 static ngx_int_t l1_cache_init(ngx_conf_t *cf);
+static ngx_int_t l1_cache_body_init(ngx_conf_t *cf);
 static ngx_int_t l1_cache_upstream_peer_init(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *uscf);
 static ngx_flag_t l1_cache_only_if_cached_delegate(ngx_http_request_t *r,
@@ -270,6 +272,7 @@ static ngx_int_t l1_cache_start_l2_purge(ngx_http_request_t *r);
 static void l1_cache_invalidate(ngx_str_t *key,
     ngx_http_l1_cache_capture_t *preserve);
 static ngx_int_t l1_cache_handler(ngx_http_request_t *r);
+static ngx_int_t l1_cache_proxy_content_handler(ngx_http_request_t *r);
 static ngx_int_t l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key);
 static ngx_int_t l1_cache_header_filter(ngx_http_request_t *r);
 static ngx_int_t l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
@@ -367,6 +370,16 @@ static ngx_http_module_t l1_cache_module_ctx = {
 
 ngx_module_t ngx_http_l1_cache_module = {
     NGX_MODULE_V1, &l1_cache_module_ctx, l1_cache_commands, NGX_HTTP_MODULE,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NGX_MODULE_V1_PADDING
+};
+
+static ngx_http_module_t l1_cache_body_module_ctx = {
+    NULL, l1_cache_body_init,
+    NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+ngx_module_t ngx_http_l1_cache_body_module = {
+    NGX_MODULE_V1, &l1_cache_body_module_ctx, NULL, NGX_HTTP_MODULE,
     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NGX_MODULE_V1_PADDING
 };
 
@@ -1258,11 +1271,9 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_l1_cache_loc_conf_t *conf = child;
     ngx_http_l1_cache_main_conf_t *mcf;
     ngx_http_proxy_loc_conf_t *plcf;
+    ngx_http_core_loc_conf_t *clcf;
     ngx_http_complex_value_t *predicate;
     ngx_uint_t i;
-#if (NGX_THREADS)
-    ngx_http_core_loc_conf_t *clcf;
-#endif
 
     mcf = ngx_http_conf_get_module_main_conf(cf,
                                              ngx_http_l1_cache_module);
@@ -1272,6 +1283,9 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->purge_l2, prev->purge_l2, 0);
     if (conf->l2_zone.len == 0) conf->l2_zone = prev->l2_zone;
     if (conf->key == NULL) conf->key = prev->key;
+    if (conf->proxy_content_handler == NULL) {
+        conf->proxy_content_handler = prev->proxy_content_handler;
+    }
 
     if (conf->enabled) {
         if (mcf == NULL || mcf->zone == NULL) {
@@ -1316,6 +1330,31 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 #else
         return "l1_cache requires NGINX built with --with-threads";
 #endif
+
+        /*
+         * Slice subrequests clone the parent's content handler and current
+         * phase index.  They therefore start at the content handler and do
+         * not revisit PRECONTENT.  Wrap the configured proxy content handler
+         * so those cloned requests can perform the same L1 lookup before the
+         * native proxy handler reads L2 or contacts the origin.
+         */
+        plcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_proxy_module);
+        if (plcf != NULL && plcf->upstream.cache
+            && plcf->cache_key.value.len == sizeof("$l1_cache_key") - 1
+            && ngx_memcmp(plcf->cache_key.value.data, "$l1_cache_key",
+                          sizeof("$l1_cache_key") - 1) == 0)
+        {
+            clcf = ngx_http_conf_get_module_loc_conf(cf,
+                                                      ngx_http_core_module);
+            if (clcf->handler == l1_cache_proxy_content_handler) {
+                if (conf->proxy_content_handler == NULL) {
+                    return "l1_cache cannot recover the wrapped proxy content handler";
+                }
+            } else if (clcf->handler != NULL) {
+                conf->proxy_content_handler = clcf->handler;
+                clcf->handler = l1_cache_proxy_content_handler;
+            }
+        }
     }
 
     return NGX_CONF_OK;
@@ -1522,6 +1561,12 @@ l1_cache_init(ngx_conf_t *cf)
     *handler = l1_cache_handler;
     l1_cache_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = l1_cache_header_filter;
+    return NGX_OK;
+}
+
+static ngx_int_t
+l1_cache_body_init(ngx_conf_t *cf)
+{
     l1_cache_next_body_filter = ngx_http_top_body_filter;
     ngx_http_top_body_filter = l1_cache_body_filter;
     return NGX_OK;
@@ -2040,6 +2085,29 @@ l1_cache_handler(ngx_http_request_t *r)
         return NGX_HTTP_GATEWAY_TIME_OUT;
     }
     return rc;
+}
+
+
+static ngx_int_t
+l1_cache_proxy_content_handler(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+    ngx_http_l1_cache_loc_conf_t *lcf;
+
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
+
+    if (lcf->enabled && r != r->main && l1_cache_is_slice_subrequest(r)) {
+        rc = l1_cache_handler(r);
+        if (rc != NGX_DECLINED) {
+            return rc;
+        }
+    }
+
+    if (lcf->proxy_content_handler == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    return lcf->proxy_content_handler(r);
 }
 
 

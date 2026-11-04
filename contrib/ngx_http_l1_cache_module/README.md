@@ -26,6 +26,13 @@ cache-key expression, and cache-zone selection. Those structures are not a
 stable public ABI; the Alpine APK therefore depends on the exact matching
 NGINX package version and is built from that version's `nginx-mod-dev` source.
 
+The dynamic library registers two NGINX module entries so the L1 header filter
+runs before the native Slice header filter, while the L1 body filter runs after
+the Copy filter has moved eligible file-backed data into memory. The configured
+proxy content handler is wrapped for Slice clone requests because NGINX clones
+them at the content phase, after PRECONTENT has already run. This lets a segment
+L1 hit happen before that clone reaches the native proxy cache or origin.
+
 ## Alpine APK
 
 The package recipe derives its NGINX version from `NGINX_PKGVER` or the
@@ -44,14 +51,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r24.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r25.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r24.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r25.apk
 sudo nginx -t
 ```
 
