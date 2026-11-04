@@ -416,7 +416,7 @@ stehen wieder auf r25. Der Lauf ist kein Nachweis für die Produktversion.
 |---|---|---|
 | 100 parallele identische Slice-GETs auf r25 | FAIL | 17/100 vollständige Bodies; 83 abgeschnittene Präfixe; Origin 16 Slice-Requests. |
 | Versuchter r26-Writer-Fix | FAIL, verworfen | 1/100 vollständig; 99 Client-Timeouts nach Teilbody. |
-| Root Cause und Korrektur für den 100-Client-Fall | PASS für diesen Fall | Die Korrektur überlässt die Finalisierung eines L1-Hits im Slice-Content-Handler dem NGINX-Core und installiert den Parent-Resume-Wrapper nicht im normalen Proxy-MISS-Pfad. r36 lieferte den zuvor fehlschlagenden 100-Client-Fall vollständig aus. |
+| r36-Ergebnis nachträglich geprüfte Worker-Sicherheit | FAIL als vollständiger Sicherheitsnachweis | Die 100 Client-Ergebnisdateien belegen Transport- und Body-Erfolg, aber der zugehörige Fehlerlog-Zeitraum enthält Worker-Abstürze mit Signal 11. Ohne Core-Dump ist die genaue Laufzeitursache nicht belegt; r36 wird deshalb nicht mehr als absturzfreier Konkurrenznachweis gewertet. |
 | Breitere Konkurrenzabnahme | OPEN | Der erfolgreiche Lauf deckt genau die dokumentierte Konfiguration ab; weitere parallele Muster und Fehlerpfade sind nicht damit abgenommen. Bereits erfolgreiche Läufe werden nicht wiederholt. |
 
 ## r36: gezielte Konkurrenzkorrektur für Slice-L1-Hits
@@ -432,9 +432,9 @@ Pfad bleibt beim nativen Handler und erhält keinen L1-Resume-Wrapper.
 |---|---|---|
 | r36 APK-Build und Installation | PASS | Alpine-Paket `nginx-mod-l1-cache-1.30.6-r36` gebaut und über r35 installiert. Das signierte Paket liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r36.apk`; `apk verify` meldete `OK`. SHA-256 `13a80a1db9eb64f1e60026cbda82ad237e13ced9deab68ffd5fc411c72fd3062`; Abhängigkeiten `nginx=1.30.6-r0`, `nginx-mod-http-cache-purge=1.30.6-r0`, musl x86_64. |
 | Konfiguration des unveränderten NGINX | PASS | `sudo nginx -t -p /tmp/l1-concurrency-r27/ -c nginx.conf` erfolgreich. Ein unprivilegierter `nginx -t` scheiterte zuvor an Zugriffsrechten auf NGINX-Logs und Runtime-Verzeichnisse; das war kein Konfigurationsfehler. |
-| 100 parallele Slice-GETs | PASS für diesen Lauf | 2 Worker, 100 parallele Clients, Slice 16 KiB, Objekt 262144 Byte. Alle 100 Ergebnisdateien waren vollständig und hatten SHA-256 `30e6369451b7999d37b91cba152ddf6df9f0a0eaf14c72a6e344f23b47c993a8`; 0 curl-Fehler. Die 100 zugehörigen Access-Log-Einträge meldeten `L1_HIT`. |
+| 100 parallele Slice-GETs | Body-Prüfung PASS; Prozesssicherheit FAIL | 2 Worker, 100 parallele Clients, Slice 16 KiB, Objekt 262144 Byte. Die Ergebnisdateien waren vollständig und bytegleich, aber der Fehlerlog-Zeitraum enthält Worker-SIGSEGVs. Daher ist der alte Lauf kein vollständiger Erfolg. |
 | Origin-Verkehr im selben Lauf | EINGESCHRÄNKT | Während des Testintervalls kamen zwei Origin-Einträge hinzu. Der Lauf belegt deshalb keine Aussage, dass alle Requests originfrei bedient wurden; die Bytekorrektheit und vollständige Antwort aller Clients sind jedoch nachgewiesen. |
-| Konkurrenzproblem | PASS für den reproduzierten 100-Client-Fall | Der frühere r25-Lauf lieferte nur 17/100 vollständige Bodies. r36 lieferte in der gleichen Konfiguration 100/100 vollständige Bodies. Dies ist ein gezielter Nachweis für diesen Lastfall, keine vollständige Parallelitäts- oder Dauerabnahme. |
+| Body-Korrektheit im früheren Lauf | PASS als Body-Befund; Gesamtlauf FAIL | r36 lieferte 100/100 vollständige Bodies, doch der nachträglich geprüfte Fehlerlog zeigt Worker-SIGSEGVs. Für absturzfreie Konkurrenz ist daher r44 maßgeblich; der Lauf belegt keine vollständige Parallelitäts- oder Dauerabnahme. |
 
 Die Korrektur und dieser einzelne Lauf ersetzen keine übrigen offenen
 Abnahmepunkte. Eine erneute Ausführung dieses bestandenen 100-Client-Laufs ist
@@ -502,3 +502,28 @@ Invalidierung aus.
 | POST aus einer `l1_cache off`-Location | PASS für geprüfte Konfiguration | GET in aktivierter Location: L2-MISS; zweiter GET: L1-HIT; POST über getrennte `l1_cache off`-Location mit identischem L1/L2-Key: 204; Folge-GET: L2-MISS. Origin-Log exakt GET/POST/GET; GET-Bodies bytegleich. Stock-NGINX 1.30.6, temporärer Lauf `/tmp/l1-r43-disabled-location-invalidation-20261104a`. |
 | Ablehnung von `l1_cache_l2_purge off` für gemeinsamen Key | PASS | Einmaliger negativer `nginx -t`-Lauf mit `l1_cache_l2_purge off` in der deaktivierten Location wurde wie erwartet abgelehnt: `cannot be disabled for a shared cache key`. |
 | Vollständige Unsafe-Methoden-/Invalidierungsabnahme | OPEN | Geprüft wurden erfolgreiche POST-Antworten in aktivierter und deaktivierter Location. Andere Statuscodes, Methoden und Race-Konstellationen bleiben unbewertet. Bereits bestandene Läufe wurden nicht wiederholt. |
+
+## r44: Slice-Resume nach nativer Request-Finalisierung absichern
+
+Die rückblickende Logprüfung des früheren r36-Konkurrenzlaufs fand SIGSEGVs
+in NGINX-Workern. Ein Core-Dump liegt nicht vor, daher ist der damalige
+Laufzeit-Stack unbekannt. Die Codeprüfung zeigte im L1-Slice-Resume-Handler,
+dass der native NGINX-Writer synchron finalisieren und den Request-Pool
+freigeben kann; der alte Handler las anschließend noch `r` und den Modulkontext.
+Der Handler stellt den Resume-Wrapper nun vor dem Writer-Aufruf wieder her und
+kehrt direkt danach zurück. Damit verwendet er den Request nicht erneut, falls
+der Writer ihn freigegeben hat. Zuständigkeit bleibt eindeutig: NGINX besitzt
+Writer und Request-Finalisierung; das L1-Modul besitzt nur den Slice-Resume-
+Wrapper.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r44 APK-Build | PASS | `NGINX_MOD_PKGREL=44 abuild -r`; Modul gegen Alpine `nginx-mod-dev` für Stock-NGINX 1.30.6-r0 gebaut; integrierter Modul-Ladetest und `nginx -t` erfolgreich. |
+| APK-Installation und Verifikation | PASS | r44 über r43 installiert; `apk verify` meldet `OK`. SHA-256 `01200a254b77487bd4118d3e849142224d650c60dd60ac251b763d82ec392a41`. |
+| Gezielte Slice-Konkurrenzprüfung | PASS für diesen Lauf | Installiertes r44 auf unverändertem Alpine-NGINX 1.30.6, zwei Worker, 100 parallele Clients, 16-KiB-Slices, 262144-Byte-Objekt. Alle 100 Bodies bytegleich; SHA-256 `30e6369451b7999d37b91cba152ddf6df9f0a0eaf14c72a6e344f23b47c993a8`. Access-Log: 1600 `L1_HIT`-Slice-Antworten. |
+| Worker-Abstürze im gezielten Lauf | PASS für diesen Lauf | Fehlerlog enthält keinen SIGSEGV oder Signal-11-Abbruch; beide Worker beendeten sich beim regulären NGINX-Shutdown mit Exit-Code 0. |
+| Aussage zum ursprünglichen r36-Absturz | OPEN | Der korrigierte Lauf besteht den gezielten Fall, ist aber kein Stacktrace und beweist nicht rückwirkend, dass jeder r36-Absturz dieselbe Ursache hatte. Breitere Konkurrenz- und Langzeitabnahme bleibt offen. |
+
+Das APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r44.apk`. Der Testlauf
+verwendete temporäre Dateien unter `/tmp/l1-slice-fix-XbkDGt`; es wurden keine
+dauerhaften Testdateien hinzugefügt.

@@ -1437,12 +1437,9 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         return "l1_cache requires NGINX built with --with-threads";
 #endif
 
-        /*
-         * Slice subrequests clone the parent's content handler and current
-         * phase index.  They therefore start at the content handler and do
-         * not revisit PRECONTENT.  Wrap the configured proxy content handler
-         * so those cloned requests can perform the same L1 lookup before the
-         * native proxy handler reads L2 or contacts the origin.
+        /* What: Wraps the proxy handler for Slice subrequests.
+         * Why: Cloned requests skip PRECONTENT and need the L1 lookup.
+         * From: PR #1
          */
         plcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_proxy_module);
         if (plcf != NULL && plcf->upstream.cache
@@ -2131,8 +2128,9 @@ l1_cache_handle_request(ngx_http_request_t *r,
     }
     ngx_http_set_ctx(r, ctx, ngx_http_l1_cache_module);
 
-    /* What: Tracks unsafe requests even when L1 is disabled or bypassed.
-     * Why: Their successful response must invalidate any shared L1/L2 key.
+    /* What: Tracks unsafe requests while L1 is bypassed.
+     * Why: Successful responses must invalidate the shared cache key.
+     * From: PR #1
      */
     if (l1_cache_method_unsafe(r)
         && l1_cache_proxy_identity_matches(r, lcf)
@@ -2699,12 +2697,9 @@ l1_cache_lookup(ngx_http_request_t *r, ngx_str_t *key)
     }
     rc = ngx_http_output_filter(r, out);
     if (slice && rc != NGX_ERROR) {
-        /*
-         * What: Marks an L1-served slice child as waited before finalization.
-         * Why: If output is buffered, NGINX can finalize this child while it
-         *       is inactive; the native Slice filter checks sr->done before
-         *       scheduling the next segment, and WAITED makes that completion
-         *       visible on the inactive finalizer path.
+        /* What: Marks an L1 slice child as waited before finalization.
+         * Why: Slice checks sr->done before scheduling its next child.
+         * From: PR #1
          */
         r->waited = 1;
     }
@@ -2753,9 +2748,9 @@ l1_cache_install_slice_resume(ngx_http_request_t *r)
         return;
     }
 
-    /* What: Resumes the parent after an L1-served slice child completes.
-     * Why: The parent Slice filter is waiting for sr->done and may have no
-     *       upstream event to re-enter its body filter after the child ends.
+    /* What: Resumes the parent after its L1 slice child completes.
+     * Why: Buffered output may leave the parent without another wakeup.
+     * From: PR #1
      */
     ctx->slice_resume_handler = r->write_event_handler;
     r->write_event_handler = l1_cache_slice_write_handler;
@@ -2786,15 +2781,21 @@ l1_cache_slice_write_handler(ngx_http_request_t *r)
         return;
     }
 
-    /*
-     * What: Avoids running the native writer when Slice just posted a child.
-     * Why: Its second output-filter pass would dequeue that child, then the
-     *       writer could finalize the parent before the child response lands.
+    /* What: Skips the native writer when Slice posted a child.
+     * Why: A second pass can dequeue it before its response completes.
+     * From: PR #1
      */
     if (!r->done && r->postponed == NULL
         && r->write_event_handler == writer)
     {
+        /* What: Preserves the callback across native writer execution.
+         * Why: The writer may finalize and free this request.
+         * From: PR #1
+         */
+        ctx->slice_resume_handler = writer;
+        r->write_event_handler = l1_cache_slice_write_handler;
         writer(r);
+        return;
     }
 
     if (!r->done && r->write_event_handler == writer) {
@@ -3987,8 +3988,9 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 }
 
 
-/* What: Runs new-fill verification after native cache publication.
- * Why: The proxy's temp-file cleanup is registered after header filtering.
+/* What: Verifies new fills after native cache publication.
+ * Why: Proxy temp-file cleanup is registered after header filters.
+ * From: PR #1
  */
 static ngx_int_t
 l1_cache_defer_capture_finalize(ngx_http_request_t *r,
