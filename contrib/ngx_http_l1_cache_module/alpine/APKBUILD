@@ -11,7 +11,7 @@ url="https://github.com/djdomi/nginx-fork"
 arch="x86_64"
 license="BSD-2-Clause"
 depends="nginx=$_nginx_pkgver nginx-mod-http-cache-purge=$_nginx_pkgver"
-makedepends="nginx-mod-dev=$_nginx_pkgver"
+makedepends="nginx-mod-dev=$_nginx_pkgver nginx-mod-http-cache-purge=$_nginx_pkgver"
 source="50_l1_cache.conf"
 
 build() {
@@ -41,6 +41,7 @@ check() {
 	mkdir -p "$testdir/client" "$testdir/proxy" "$testdir/fastcgi" \
 		"$testdir/uwsgi" "$testdir/scgi" "$testdir/cache" "$testdir/logs"
 	cat > "$testdir/nginx.conf" <<EOF
+load_module /usr/lib/nginx/modules/ngx_http_cache_purge_module.so;
 load_module $srcdir/nginx/objs/ngx_http_l1_cache_module.so;
 pid $testdir/nginx.pid;
 error_log $testdir/logs/error.log;
@@ -64,6 +65,8 @@ http {
             l1_cache_l2_purge on;
             proxy_cache \$l1_cache_l2_zone;
             proxy_cache_key \$l1_cache_key;
+            proxy_cache_purge PURGE from 127.0.0.1;
+            proxy_pass http://127.0.0.1:19998;
         }
     }
 }

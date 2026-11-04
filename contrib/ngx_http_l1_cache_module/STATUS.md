@@ -439,3 +439,22 @@ Pfad bleibt beim nativen Handler und erhält keinen L1-Resume-Wrapper.
 Die Korrektur und dieser einzelne Lauf ersetzen keine übrigen offenen
 Abnahmepunkte. Eine erneute Ausführung dieses bestandenen 100-Client-Laufs ist
 nicht vorgesehen, solange der betreffende Codepfad unverändert bleibt.
+
+## Unsafe-Methoden invalidieren L1 und L2
+
+L2-Invalidierung ist für aktivierte L1-Proxy-Locations verpflichtend. Die
+Konfiguration lehnt `l1_cache_l2_purge off` ab und prüft nach dem NGINX-
+Konfigurationsmerge, dass für jede tatsächlich L1-fähige Location der native
+`proxy_cache_purge`-Handler vorhanden ist. Automatisch aktivierte Locations
+ohne passende Proxy-Cache-Konfiguration werden dabei nicht fälschlich als
+L1-fähig behandelt. Interne Invalidierungen rufen den nativen Purge-Handler
+direkt auf; öffentliche PURGE-Anfragen durchlaufen weiterhin die vorhandene
+Token- und Zugriffskontrolle.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r41 Build und NGINX-Konfigurationsprüfung | PASS | `NGINX_MOD_PKGREL=41 abuild -r`; gebaut gegen Alpine `nginx-mod-dev` für NGINX 1.30.6-r0. `make modules`, Modul-Laden und `nginx -t` im APK-Build erfolgreich. |
+| Installation auf unverändertem Alpine-NGINX | PASS | r41 über r36 installiert; installiertes Binary meldet `nginx/1.30.6`, System-`nginx -t` erfolgreich. `apk verify` für `alpine/dist/nginx-mod-l1-cache-1.30.6-r41.apk` meldet `OK`; SHA-256 `7c451de954d3e52feae3e190199e0f7ff3426b749838bc2171b3d423329d9fb8`. |
+| Erfolgreicher Unsafe-Methodenpfad | PASS für geprüften POST | Einmaliger Lauf mit zwei Workern auf Stock-NGINX: erster GET `X-L2: MISS`, zweiter GET `X-L1-Cache: HIT`; POST lieferte 204; folgender GET lieferte erneut `X-L2: MISS`. Origin-Log enthielt genau `GET /object`, `POST /object`, `GET /object`. Alle GET-Bodies bytegleich, SHA-256 `a39c3689fae129abde761eb87db3cbcc8a5207eefd0c8eaa814bfb9138b9ae22`. Laufverzeichnis `/tmp/l1-r41-unsafe-purge-20261104a`. |
+| L2-Invalidierung bei erfolgreichem Unsafe-Response | PASS für geprüften Pfad | Der nachfolgende GET erreichte den Origin erneut und war kein L1- oder L2-HIT; der POST hatte somit sowohl den L1-Eintrag als auch die native L2-Datei invalidiert. |
+| Vollständige RFC-/L1-Abnahme | OPEN | Dieser gezielte Nachweis schließt nur die geprüfte erfolgreiche POST-Invalidierung. Weitere Fälle der Gesamtmatrix bleiben offen. |

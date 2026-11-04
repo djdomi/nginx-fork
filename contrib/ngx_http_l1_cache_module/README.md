@@ -51,14 +51,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r25.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r41.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r25.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r41.apk
 sudo nginx -t
 ```
 
@@ -147,11 +147,14 @@ check fails, the module bypasses L1 and leaves native proxy handling intact.
 The request-policy variables must be connected to the native proxy directives
 as shown above. They apply request `no-cache`, `no-store`, `Pragma`, and
 credential bypass decisions to L2 as well as L1. The Alpine APK depends on
-Alpine's version-matched `nginx-mod-http-cache-purge`; configure its
-`proxy_cache_purge` directive for authorized PURGE requests. The L1 module
-validates its purge token and invalidates shared-memory objects before handing
-the request to that L2 purge handler. PURGE of `/` invalidates every L1 object;
-the OSS L2 purge module purges the key represented by that request.
+Alpine's version-matched `nginx-mod-http-cache-purge`. Every L1-eligible
+location must configure its same-location `proxy_cache_purge` directive;
+NGINX rejects such a location without that handler. Locations that do not
+match the configured native proxy-cache key bypass L1. Internal purges call the
+configured native purge handler directly, while client PURGE requests still
+pass through the L1 token check and the add-on's access rules. PURGE of `/`
+invalidates every L1 object; the OSS L2 purge module purges the key represented
+by that request.
 
 For `only-if-cached`, a valid L1 hit is served before proxy processing,
 including when `proxy_pass` uses variables. For supported static upstreams,
@@ -199,12 +202,15 @@ predicates remain authoritative for whether an upstream response may be
 admitted to L1, matching their native role as write controls.
 
 Successful responses to unsafe methods (2xx or 3xx) invalidate the matching
-L1 entry; failed responses leave it usable. Set `l1_cache_l2_purge on` to
-schedule a background internal `PURGE` subrequest to the configured native
-cache-purge handler. This requires `proxy_cache_purge PURGE ...` in the same
-location and preserves the original URI, arguments, and request headers used
-to compute the cache key. The unsafe request's response is still returned to
-the client. Without that setting, only L1 is invalidated.
+L1 entry and schedule an internal call to the configured native L2 purge
+handler; failed responses leave both cache entries usable. L2 invalidation is
+mandatory for an enabled L1 location: `l1_cache_l2_purge` defaults to `on`, and
+`off` is rejected during configuration. The same-location
+`proxy_cache_purge PURGE ...` directive is required. The internal purge
+preserves the original URI, arguments, and request headers used to compute the
+cache key. Client PURGE requests remain protected by the L1 token and any
+configured access rule. The unsafe request's response is still returned to
+the client.
 
 For `Cache-Control: only-if-cached`, a fresh L1 hit is served. On an L1 miss
 with a supported static proxy upstream, NGINX may serve a native L2 hit; the

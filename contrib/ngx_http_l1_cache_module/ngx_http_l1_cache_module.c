@@ -25,6 +25,8 @@ typedef enum {
 } ngx_http_l1_cache_state_e;
 
 extern ngx_module_t ngx_http_slice_filter_module;
+extern ngx_int_t ngx_http_cache_purge_access_handler(ngx_http_request_t *r);
+extern ngx_int_t ngx_http_proxy_cache_purge_handler(ngx_http_request_t *r);
 
 static ngx_str_t l1_cache_slice_range_name = ngx_string("slice_range");
 static ngx_str_t l1_cache_key_name = ngx_string("l1_cache_key");
@@ -151,6 +153,7 @@ typedef struct {
     ngx_uint_t                   protected_percent;
     ngx_uint_t                   building_percent;
     ngx_str_t                    key_id;
+    ngx_array_t                  l1_locations;
     ngx_array_t                  peer_hooks;
 } ngx_http_l1_cache_main_conf_t;
 
@@ -162,6 +165,11 @@ typedef struct {
     ngx_http_complex_value_t *key;
     ngx_http_handler_pt proxy_content_handler;
 } ngx_http_l1_cache_loc_conf_t;
+
+typedef struct {
+    ngx_http_core_loc_conf_t *clcf;
+    ngx_http_l1_cache_loc_conf_t *lcf;
+} ngx_http_l1_cache_location_t;
 
 typedef struct {
     ngx_http_request_t *r;
@@ -1248,6 +1256,7 @@ static void *
 l1_cache_create_main_conf(ngx_conf_t *cf)
 {
     ngx_http_l1_cache_main_conf_t *conf;
+
     conf = ngx_pcalloc(cf->pool, sizeof(*conf));
     if (conf == NULL) return NULL;
     conf->max_object = NGX_CONF_UNSET_SIZE;
@@ -1255,6 +1264,11 @@ l1_cache_create_main_conf(ngx_conf_t *cf)
     conf->ttl = NGX_CONF_UNSET_UINT;
     conf->protected_percent = NGX_CONF_UNSET_UINT;
     conf->building_percent = NGX_CONF_UNSET_UINT;
+    if (ngx_array_init(&conf->l1_locations, cf->pool, 8,
+                       sizeof(ngx_http_l1_cache_location_t)) != NGX_OK)
+    {
+        return NULL;
+    }
     return conf;
 }
 
@@ -1278,6 +1292,7 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_l1_cache_main_conf_t *mcf;
     ngx_http_proxy_loc_conf_t *plcf;
     ngx_http_core_loc_conf_t *clcf;
+    ngx_http_l1_cache_location_t *location;
     ngx_http_complex_value_t *predicate;
     ngx_uint_t i;
 
@@ -1286,7 +1301,7 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->enabled, prev->enabled,
                          mcf != NULL && mcf->zone != NULL);
     ngx_conf_merge_value(conf->force, prev->force, 0);
-    ngx_conf_merge_value(conf->purge_l2, prev->purge_l2, 0);
+    ngx_conf_merge_value(conf->purge_l2, prev->purge_l2, conf->enabled);
     if (conf->l2_zone.len == 0) conf->l2_zone = prev->l2_zone;
     if (conf->key == NULL) conf->key = prev->key;
     if (conf->proxy_content_handler == NULL) {
@@ -1303,7 +1318,24 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         if (conf->l2_zone.len == 0 || conf->key == NULL) {
             return "l1_cache_l2_zone and l1_cache_key must be configured";
         }
+        if (!conf->purge_l2) {
+            return "l1_cache_l2_purge cannot be disabled for an L1 cache";
+        }
         plcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_proxy_module);
+        if (plcf != NULL && plcf->upstream.cache
+            && plcf->cache_key.value.len == sizeof("$l1_cache_key") - 1
+            && ngx_memcmp(plcf->cache_key.value.data, "$l1_cache_key",
+                          sizeof("$l1_cache_key") - 1) == 0)
+        {
+            clcf = ngx_http_conf_get_module_loc_conf(cf,
+                                                      ngx_http_core_module);
+            location = ngx_array_push(&mcf->l1_locations);
+            if (location == NULL) {
+                return NGX_CONF_ERROR;
+            }
+            location->clcf = clcf;
+            location->lcf = conf;
+        }
         if (plcf != NULL && plcf->upstream.cache_bypass != NULL) {
             predicate = plcf->upstream.cache_bypass->elts;
             for (i = 0; i < plcf->upstream.cache_bypass->nelts; i++) {
@@ -1512,6 +1544,7 @@ l1_cache_init(ngx_conf_t *cf)
     ngx_http_l1_cache_peer_hook_t *hook;
     ngx_http_handler_pt *handler;
     ngx_http_l1_cache_main_conf_t *conf;
+    ngx_http_l1_cache_location_t *location;
     ngx_uint_t i;
     conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_l1_cache_module);
     ngx_conf_init_size_value(conf->max_object, L1_MAX_OBJECT);
@@ -1523,6 +1556,18 @@ l1_cache_init(ngx_conf_t *cf)
     ngx_conf_init_uint_value(conf->protected_percent, 80);
     ngx_conf_init_uint_value(conf->building_percent, 10);
     if (conf->zone == NULL) return NGX_OK;
+    location = conf->l1_locations.elts;
+    for (i = 0; i < conf->l1_locations.nelts; i++) {
+        if (location[i].clcf->handler != ngx_http_cache_purge_access_handler
+            && !(location[i].clcf->handler == l1_cache_proxy_content_handler
+                 && location[i].lcf->proxy_content_handler
+                    == ngx_http_cache_purge_access_handler))
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "l1_cache requires same-location proxy_cache_purge");
+            return NGX_ERROR;
+        }
+    }
     if (conf->max_object == 0 || conf->ttl == 0
         || conf->ttl > NGX_MAX_INT_T_VALUE
         || conf->block_size < ngx_pagesize
@@ -1965,6 +2010,7 @@ l1_cache_handle_request(ngx_http_request_t *r,
     static u_char purge_method[] = "PURGE";
     ngx_http_l1_cache_loc_conf_t *lcf;
     ngx_http_l1_cache_ctx_t *ctx;
+    ngx_http_core_loc_conf_t *clcf;
     ngx_http_variable_value_t *slice_value;
     ngx_int_t slice, rc;
     ngx_str_t key;
@@ -1972,7 +2018,18 @@ l1_cache_handle_request(ngx_http_request_t *r,
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
     if (ctx != NULL && ctx->internal_l2_purge) {
-        return NGX_DECLINED;
+        clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+        lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
+        if (clcf->handler != ngx_http_cache_purge_access_handler
+            && !(clcf->handler == l1_cache_proxy_content_handler
+                 && lcf->proxy_content_handler
+                    == ngx_http_cache_purge_access_handler))
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "l1 cache internal L2 purge handler is missing");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+        return ngx_http_proxy_cache_purge_handler(r);
     }
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
@@ -2108,6 +2165,12 @@ l1_cache_proxy_content_handler(ngx_http_request_t *r)
 {
     ngx_int_t rc;
     ngx_http_l1_cache_loc_conf_t *lcf;
+    ngx_http_l1_cache_ctx_t *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->internal_l2_purge) {
+        return ngx_http_proxy_cache_purge_handler(r);
+    }
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
 
