@@ -386,7 +386,7 @@ vollständige verbindliche Abnahmematrix bleibt offen.
 | Full-Zone-PURGE für L1 und L2 | PASS für geprüften Root-Pfad | Mit `proxy_cache_purge PURGE purge_all from 127.0.0.1`: Fill→L1-HIT→autorisierter `PURGE /`→Folgeabruf `L1_MISS_L2_MISS`; Origin-Requests 2, gleiche Body-Prüfsumme vor und nach Purge. |
 | Force-Conditional `If-Modified-Since` | PASS | Mit Force aktiviert lieferte ein zum Last-Modified passender Validator HTTP 304; die Anfrage wurde nicht aus L1 beantwortet. |
 | Force-Conditional `If-Unmodified-Since` | PASS | Mit Force aktiviert lieferte ein älterer Validator HTTP 412; NGINX erhielt die Client-Precondition unverändert. |
-| Vollständige Abnahme | OPEN | Die Slice-L1-Lücke ist behoben und die gezielte Paketprüfung bestanden. Andere offene Punkte der Gesamtmatrix (Force-Preconditions, RFC-Matrix, Invalidierungs-/Reload-/Konkurrenz- und Speicherfehlerfälle) bleiben offen; daher keine Produktionsfreigabe. |
+| Vollständige Abnahme | OPEN | Die Slice-L1-Lücke ist behoben und die gezielte Paketprüfung bestanden. Andere offene Punkte der Gesamtmatrix (vollständige RFC-Matrix sowie weitere Invalidierungs-, Reload-, Konkurrenz- und Speicherfehlerfälle) bleiben offen; daher keine Produktionsfreigabe. |
 
 Der zuvor fehlgeschlagene Slice-L1-Pfad hatte zwei Ursachen: NGINX-Slice-Klone
 erreichen PRECONTENT nicht erneut, und ein einzelner Filter kann nicht zugleich
