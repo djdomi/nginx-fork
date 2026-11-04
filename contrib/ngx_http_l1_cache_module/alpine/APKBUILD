@@ -54,6 +54,7 @@ http {
     uwsgi_temp_path $testdir/uwsgi;
     scgi_temp_path $testdir/scgi;
     l1_cache_zone test 16m;
+    l1_cache_max_tracked_requests 16;
     l1_cache_key_id package-check;
     l1_cache_l2_zone disk;
     l1_cache_key "\$scheme\$host\$uri\$is_args\$args\$slice_range";

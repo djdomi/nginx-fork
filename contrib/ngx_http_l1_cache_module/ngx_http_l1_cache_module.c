@@ -16,7 +16,6 @@
 #define L1_MAX_OBJECT (8 * 1024 * 1024)
 #define L1_MAX_PROTECTED_PERCENT 80
 #define L1_MAX_BUILDING_PERCENT 10
-#define L1_MAX_TRACKED_REQUESTS 4096
 
 typedef enum {
     L1_ENTRY_BUILDING = 0,
@@ -158,6 +157,7 @@ typedef struct {
     ngx_uint_t                   ttl;
     ngx_uint_t                   protected_percent;
     ngx_uint_t                   building_percent;
+    ngx_uint_t                   max_tracked_requests;
     ngx_str_t                    key_id;
     ngx_array_t                  l1_locations;
     ngx_array_t                  peer_hooks;
@@ -385,6 +385,10 @@ static ngx_command_t l1_cache_commands[] = {
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1, ngx_conf_set_num_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof(ngx_http_l1_cache_main_conf_t, building_percent), NULL },
+    { ngx_string("l1_cache_max_tracked_requests"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1, ngx_conf_set_num_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_l1_cache_main_conf_t, max_tracked_requests), NULL },
     { ngx_string("l1_cache"), NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_l1_cache_loc_conf_t, enabled), NULL },
@@ -1350,6 +1354,7 @@ l1_cache_create_main_conf(ngx_conf_t *cf)
     conf->ttl = NGX_CONF_UNSET_UINT;
     conf->protected_percent = NGX_CONF_UNSET_UINT;
     conf->building_percent = NGX_CONF_UNSET_UINT;
+    conf->max_tracked_requests = NGX_CONF_UNSET_UINT;
     if (ngx_array_init(&conf->l1_locations, cf->pool, 8,
                        sizeof(ngx_http_l1_cache_location_t)) != NGX_OK)
     {
@@ -1647,6 +1652,7 @@ l1_cache_init(ngx_conf_t *cf)
     }
     ngx_conf_init_uint_value(conf->protected_percent, 80);
     ngx_conf_init_uint_value(conf->building_percent, 10);
+    ngx_conf_init_uint_value(conf->max_tracked_requests, 4096);
     if (conf->zone == NULL) return NGX_OK;
     location = conf->l1_locations.elts;
     for (i = 0; i < conf->l1_locations.nelts; i++) {
@@ -1664,7 +1670,9 @@ l1_cache_init(ngx_conf_t *cf)
         || conf->ttl > NGX_MAX_INT_T_VALUE
         || conf->block_size < ngx_pagesize
         || conf->protected_percent > L1_MAX_PROTECTED_PERCENT
-        || conf->building_percent > L1_MAX_BUILDING_PERCENT)
+        || conf->building_percent > L1_MAX_BUILDING_PERCENT
+        || conf->max_tracked_requests == 0
+        || conf->max_tracked_requests > NGX_MAX_INT_T_VALUE)
     {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "invalid L1 cache memory or expiry setting");
@@ -4781,7 +4789,8 @@ l1_cache_track_request(ngx_http_request_t *r, ngx_http_l1_cache_ctx_t *ctx)
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     l1_cache_reap_captures_locked();
     if (ctx->purge_generation != l1_cache_conf->sh->purge_generation
-        || l1_cache_conf->sh->tracked_requests >= L1_MAX_TRACKED_REQUESTS)
+        || l1_cache_conf->sh->tracked_requests
+           >= l1_cache_conf->max_tracked_requests)
     {
         ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
         return NGX_ERROR;

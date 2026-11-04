@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r53.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r54.
 
 ## Pre-search reasoning record (r22)
 
@@ -570,11 +570,12 @@ L1-unfähigen oder anderweitig nicht aufnehmbaren Antworten. Das Modul legt nun
 beim L1-Miss vor der Origin-/L2-Antwort einen kleinen Shared-Memory-Tracker an.
 Ein erfolgreicher Body-Capture übernimmt diesen Datensatz; andernfalls bleibt
 er bis zum Stream-Ende bestehen und kann eine native L2-PURGE-Nachbearbeitung
-auslösen. Die Anzahl gleichzeitiger Tracker ist auf 4096 begrenzt. Bei
-Kapazitäts- oder Allokationsfehlern werden L1- und L2-Cache für diese Anfrage
-umgangen, damit kein nicht überwachter Fill nach einem PURGE gespeichert wird.
-Eine purge_generation schützt außerdem gegen Requests, die ihren Kontext vor
-PURGE angelegt, den Tracker aber erst danach versucht haben anzulegen.
+auslösen. Die Trackeranzahl ist standardmäßig auf 4096 begrenzt und mit
+`l1_cache_max_tracked_requests` konfigurierbar. Bei Kapazitäts- oder
+Allokationsfehlern werden L1- und L2-Cache für diese Anfrage umgangen, damit
+kein nicht überwachter Fill nach einem PURGE gespeichert wird. Eine
+purge_generation schützt außerdem gegen Requests, die ihren Kontext vor PURGE
+angelegt, den Tracker aber erst danach versucht haben anzulegen.
 
 Bei einem PURGE mit aktivem Fill antwortet der Modulpfad mit HTTP 202 und
 startet die native Cache-PURGE nach Abschluss des Response-Streams. NGINX-
@@ -610,3 +611,20 @@ sieht `POST_COMMIT` und geht direkt durch den nativen PURGE-Pfad.
 | Vollständige PURGE-Race-Abnahme | OPEN | Der gezielte Fill deckt einen großen, nicht in L1 aufnehmbaren Origin-Fill über den nachgelagerten Commit-Check ab. 304-Revalidierung, Abbruch, mehrere gleichzeitige Writes desselben Keys sowie absichtlicher Shared-Memory-Mangel sind nicht abgenommen. |
 
 Das r53-Paket liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r53.apk`.
+
+## r54: Trackergrenze konfigurierbar
+
+Die Obergrenze für gleichzeitig aktive Invalidierungs-Tracker ist jetzt als
+HTTP-Main-Direktive `l1_cache_max_tracked_requests` einstellbar. Der Standard
+bleibt 4096. Null und Werte oberhalb des NGINX-Atomarzählerbereichs werden
+abgelehnt. Die APK-Build-Konfiguration setzt die Direktive selbst; zusätzlich
+wurde sie mit Wert 8 in einer temporären Konfiguration gegen das installierte
+Modul und das unveränderte NGINX geprüft.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r54 APK-Build und integrierter Modul-Ladetest | PASS | Gegen `nginx-mod-dev=1.30.6-r0` gebaut; `make modules`, Modulinitialisierung und APK-Build-Prüfung `nginx -t` erfolgreich. |
+| APK-Verifikation und Installation | PASS | `apk verify` meldet `OK`; r54 über r53 installiert; unverändertes `/etc/nginx/nginx.conf` mit `nginx -t` erfolgreich. SHA-256 `6038625e244cb2f88bc1617786b70e7416337a4e130ab0b428087c5327928d30`. |
+| Konfigurierter Trackergrenzwert | PASS | Temporäre Stock-NGINX-Konfiguration mit `l1_cache_max_tracked_requests 8` besteht `nginx -t`; `/tmp/l1-purge-check-r52-1/front.conf`. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r54.apk`.

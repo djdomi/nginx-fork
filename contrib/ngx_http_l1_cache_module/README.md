@@ -56,14 +56,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r53.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r54.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r53.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r54.apk
 sudo nginx -t
 ```
 
@@ -83,6 +83,7 @@ http {
     l1_cache_l2_zone disk;
     l1_cache_key "$scheme$host$uri$is_args$args$slice_range";
     l1_cache_max_object 8m;
+    l1_cache_max_tracked_requests 4096;
     l1_cache_ttl 300;
 
     proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=disk:64m;
@@ -125,7 +126,8 @@ On reload, allocator-relevant L1 settings are compared field by field in
 shared memory; a changed value advances the generation, cancels in-progress
 captures, and invalidates old objects before new workers use the zone.
 Before response headers, each eligible cache miss also reserves a bounded
-invalidation tracker (maximum 4096). It covers responses that L1 cannot admit.
+invalidation tracker (maximum 4096 by default, configurable with
+`l1_cache_max_tracked_requests`). It covers responses that L1 cannot admit.
 If the tracker cannot be allocated, that request bypasses both cache tiers.
 After the response stream, a background check runs after NGINX's native L2
 commit and performs a deferred native PURGE only when one raced with the fill.
@@ -293,7 +295,8 @@ are intentional.
 Other module options are
 `l1_cache_zone`, `l1_cache_key_id`, `l1_cache_max_object`, `l1_cache_block_size`,
 `l1_cache_protected_percent`, `l1_cache_building_percent`,
-`l1_cache_purge_token`, and the per-location `l1_cache` switch.
+`l1_cache_max_tracked_requests`, `l1_cache_purge_token`, and the per-location
+`l1_cache` switch.
 
 Slice subrequests use the native `$slice_range`, require a strong ETag, and
 are cached as individual segments. The module does not synthesize range
