@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r54.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r55.
 
 ## Pre-search reasoning record (r22)
 
@@ -627,4 +627,24 @@ Modul und das unveränderte NGINX geprüft.
 | APK-Verifikation und Installation | PASS | `apk verify` meldet `OK`; r54 über r53 installiert; unverändertes `/etc/nginx/nginx.conf` mit `nginx -t` erfolgreich. SHA-256 `6038625e244cb2f88bc1617786b70e7416337a4e130ab0b428087c5327928d30`. |
 | Konfigurierter Trackergrenzwert | PASS | Temporäre Stock-NGINX-Konfiguration mit `l1_cache_max_tracked_requests 8` besteht `nginx -t`; `/tmp/l1-purge-check-r52-1/front.conf`. |
 
-Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r54.apk`.
+Das r54-Artefakt liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r54.apk`.
+
+## r55: PURGE-Race-Check bei Subrequest-Fehler fail-closed behandeln
+
+Die beiden Body-Filter-Endpfade ignorierten bisher einen Fehler beim Anlegen
+des nachgelagerten PURGE-Prüf-Subrequests. Ohne diesen Check könnte NGINX den
+laufenden nativen L2-Fill nach einem konkurrierenden PURGE noch veröffentlichen.
+Der gemeinsame Fehlerpfad lehnt nun die L1-Aufnahme ab und setzt
+`r->upstream->cacheable` zurück, bevor der Body-Pipe-Handler den nativen
+Datei-Commit ausführt. Die Clientantwort wird weitergeleitet. Die gemeinsame
+Capture-Aufräumlogik bleibt aktiv, damit ein PURGE den laufenden Request bis
+zu dessen Abschluss weiterhin erkennt.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r55 Build und Modulinitialisierung | PASS | `abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; dynamisches Modul kompiliert und die integrierte Modul-Konfiguration bestand `nginx -t`. |
+| APK-Verifikation und Installation | PASS | `apk verify` OK; r55 über r54 installiert. Paket-SHA-256 `ec1158b6497b66acb178439520fa15faa5d254f94eab24e6a02599f66979fdcd`. |
+| Unverändertes System-NGINX | PASS | `/etc/nginx/nginx.conf` mit installiertem r55 bestand `nginx -t`; die vorhandene `variables_hash`-Warnung ist nicht fatal. |
+| Erzwungener Subrequest-Allokationsfehler im Laufzeittest | OPEN | Der fail-closed Fehlerpfad wurde gebaut, aber ein künstlich induzierter Laufzeitfehler wurde nicht ausgeführt. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r55.apk`.

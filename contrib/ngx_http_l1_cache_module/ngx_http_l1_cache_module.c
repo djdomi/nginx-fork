@@ -344,6 +344,8 @@ static ngx_int_t l1_cache_track_request(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx);
 static ngx_int_t l1_cache_schedule_post_commit_check(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx);
+static void l1_cache_post_commit_check_failed(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx);
 static size_t l1_cache_capture_reserved_bytes(
     ngx_http_l1_cache_capture_t *capture);
 static ngx_int_t l1_cache_cacheable(ngx_http_request_t *r,
@@ -4235,7 +4237,9 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
         if (complete) {
             ctx->complete = 1;
-                (void) l1_cache_schedule_post_commit_check(r, ctx);
+            if (l1_cache_schedule_post_commit_check(r, ctx) != NGX_OK) {
+                l1_cache_post_commit_check_failed(r, ctx);
+            }
         }
         return l1_cache_next_body_filter(r, in);
     }
@@ -4273,9 +4277,11 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             l1_cache_release_capture(ctx);
         } else {
             ctx->complete = 1;
-            (void) l1_cache_schedule_post_commit_check(r, ctx);
+            if (l1_cache_schedule_post_commit_check(r, ctx) != NGX_OK) {
+                l1_cache_post_commit_check_failed(r, ctx);
+            }
 
-            if (ctx->l2_miss && !ctx->l2_revalidated
+            if (ctx->admit && ctx->l2_miss && !ctx->l2_revalidated
                 && l1_cache_defer_capture_finalize(r, ctx) != NGX_OK)
             {
                 ctx->admit = 0;
@@ -4868,6 +4874,21 @@ l1_cache_schedule_post_commit_check(ngx_http_request_t *r,
 
     ctx->l2_purge_scheduled = 1;
     return NGX_OK;
+}
+
+
+/* What: Fails closed when the post-commit race guard cannot be queued.
+ * Why: An unguarded L2 commit could undo a concurrent PURGE.
+ */
+static void
+l1_cache_post_commit_check_failed(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx)
+{
+    ctx->admit = 0;
+    if (r->upstream != NULL) {
+        r->upstream->cacheable = 0;
+    }
+    (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->rejected, 1);
 }
 
 
