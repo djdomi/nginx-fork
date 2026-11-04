@@ -16,6 +16,7 @@
 #define L1_MAX_OBJECT (8 * 1024 * 1024)
 #define L1_MAX_PROTECTED_PERCENT 80
 #define L1_MAX_BUILDING_PERCENT 10
+#define L1_MAX_TRACKED_REQUESTS 4096
 
 typedef enum {
     L1_ENTRY_BUILDING = 0,
@@ -67,6 +68,9 @@ typedef char ngx_http_l1_cache_capture_pointer_fits[
 
 #define L1_CAPTURE_CANCELLED  0x01
 #define L1_CAPTURE_HAS_ENTRY  0x02
+#define L1_CAPTURE_PURGE_PENDING  0x04
+#define L1_CAPTURE_TRACK_ONLY 0x08
+#define L1_CAPTURE_POST_COMMIT 0x10
 
 struct ngx_http_l1_cache_entry_s {
     ngx_rbtree_node_t node;
@@ -120,7 +124,9 @@ typedef struct {
     ngx_queue_t       pins;
     ngx_atomic_t      building;
     ngx_atomic_t      building_bytes;
+    ngx_atomic_t      tracked_requests;
     ngx_atomic_t      generation;
+    ngx_atomic_t      purge_generation;
     ngx_atomic_t      requests;
     ngx_atomic_t      hits;
     ngx_atomic_t      misses;
@@ -200,6 +206,7 @@ typedef struct {
     time_t       response_time;
     ngx_msec_t   response_msec;
     ngx_atomic_t generation;
+    ngx_atomic_t purge_generation;
     ngx_uint_t   hit:1;
     ngx_uint_t   admit:1;
     ngx_uint_t   reserved:1;
@@ -227,6 +234,11 @@ typedef struct {
     ngx_uint_t   only_if_cached_body_replaced:1;
     ngx_uint_t   capture_finalizer_deferred:1;
     ngx_uint_t   finalized_by_content_handler:1;
+    ngx_uint_t   l2_purge_scheduled:1;
+    ngx_uint_t   internal_l2_purge_check:1;
+    ngx_uint_t   purge_check_performed:1;
+    ngx_uint_t   tracked:1;
+    ngx_uint_t   tracking_failed:1;
     ngx_pool_cleanup_t *capture_cleanup;
     ngx_http_l1_cache_capture_t *capture;
     ngx_http_event_handler_pt slice_resume_handler;
@@ -282,9 +294,19 @@ static ngx_int_t l1_cache_restore_headers(ngx_http_request_t *r,
     u_char *data, size_t len);
 static ngx_int_t l1_cache_purge_request(ngx_http_request_t *r,
     ngx_str_t *key, ngx_str_t *token);
-static ngx_int_t l1_cache_start_l2_purge(ngx_http_request_t *r);
+static ngx_int_t l1_cache_purge_accepted_handler(ngx_http_request_t *r);
+static ngx_int_t l1_cache_start_l2_purge(ngx_http_request_t *r,
+    ngx_str_t *proxy_key, ngx_http_l1_cache_capture_t *capture);
+static ngx_int_t l1_cache_start_l2_purge_check(ngx_http_request_t *r,
+    ngx_str_t *proxy_key, ngx_http_l1_cache_capture_t *capture);
+static ngx_int_t l1_cache_l2_purge_check_content_handler(
+    ngx_http_request_t *r);
+static ngx_int_t l1_cache_l2_purge_check_post_subrequest(
+    ngx_http_request_t *r, void *data, ngx_int_t rc);
+static ngx_int_t l1_cache_l2_purge_post_subrequest(ngx_http_request_t *r,
+    void *data, ngx_int_t rc);
 static void l1_cache_invalidate(ngx_str_t *key,
-    ngx_http_l1_cache_capture_t *preserve);
+    ngx_http_l1_cache_capture_t *preserve, ngx_flag_t purge_l2);
 static ngx_int_t l1_cache_handler(ngx_http_request_t *r);
 static ngx_int_t l1_cache_handle_request(ngx_http_request_t *r,
     ngx_flag_t finalized_by_content_handler);
@@ -317,6 +339,11 @@ static void l1_cache_copy_capture_body(ngx_http_l1_cache_entry_t *entry,
 static void l1_cache_reap_captures_locked(void);
 static u_char *l1_cache_capture_key(ngx_http_l1_cache_capture_t *capture,
     size_t *len);
+static ngx_flag_t l1_cache_has_pending_l2_purge(ngx_str_t *key);
+static ngx_int_t l1_cache_track_request(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx);
+static ngx_int_t l1_cache_schedule_post_commit_check(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx);
 static size_t l1_cache_capture_reserved_bytes(
     ngx_http_l1_cache_capture_t *capture);
 static ngx_int_t l1_cache_cacheable(ngx_http_request_t *r,
@@ -600,7 +627,7 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 {
     static u_char cache_key_version[] = "\0L1-NATIVE-AGE-V2\0";
     ngx_http_l1_cache_loc_conf_t *lcf;
-    ngx_http_l1_cache_ctx_t *ctx, *main_ctx;
+    ngx_http_l1_cache_ctx_t *ctx;
     ngx_list_part_t *part;
     ngx_table_elt_t *h;
     ngx_str_t expanded;
@@ -610,14 +637,12 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
     if (ctx != NULL && ctx->internal_l2_purge) {
-        main_ctx = ngx_http_get_module_ctx(r->main,
-                                           ngx_http_l1_cache_module);
-        if (main_ctx == NULL || !main_ctx->proxy_key_ready) {
+        if (!ctx->proxy_key_ready) {
             v->not_found = 1;
             return NGX_OK;
         }
-        v->data = main_ctx->proxy_key.data;
-        v->len = main_ctx->proxy_key.len;
+        v->data = ctx->proxy_key.data;
+        v->len = ctx->proxy_key.len;
         v->valid = 1;
         v->no_cacheable = 1;
         v->not_found = 0;
@@ -1497,7 +1522,7 @@ l1_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
 
     if (old_conf != NULL) {
         if (old_conf->sh == NULL
-            || old_conf->sh->version != 8)
+            || old_conf->sh->version != 9)
         {
             ngx_log_error(NGX_LOG_EMERG, zone->shm.log, 0,
                           "incompatible L1 cache shared memory layout");
@@ -1509,7 +1534,7 @@ l1_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
         sh = ngx_slab_alloc(shpool, sizeof(*sh));
         if (sh == NULL) return NGX_ERROR;
         ngx_memzero(sh, sizeof(*sh));
-        sh->version = 8;
+        sh->version = 9;
         ngx_rbtree_init(&sh->index, &sh->sentinel, l1_cache_rbtree_insert);
         ngx_queue_init(&sh->probation);
         ngx_queue_init(&sh->protected);
@@ -1517,7 +1542,9 @@ l1_cache_zone_init(ngx_shm_zone_t *zone, void *old_data)
         ngx_queue_init(&sh->pins);
         sh->building = 0;
         sh->building_bytes = 0;
+        sh->tracked_requests = 0;
         sh->generation = 1;
+        sh->purge_generation = 1;
         sh->requests = 0;
         sh->hits = 0;
         sh->misses = 0;
@@ -2082,6 +2109,9 @@ l1_cache_handle_request(ngx_http_request_t *r,
     ngx_flag_t cache_bypass;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->internal_l2_purge_check) {
+        return NGX_DECLINED;
+    }
     if (ctx != NULL && ctx->internal_l2_purge) {
         clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
         lcf = ngx_http_get_module_loc_conf(r, ngx_http_l1_cache_module);
@@ -2116,6 +2146,7 @@ l1_cache_handle_request(ngx_http_request_t *r,
      */
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     ctx->generation = l1_cache_conf->sh->generation;
+    ctx->purge_generation = l1_cache_conf->sh->purge_generation;
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
     l1_cache_request_cache_policy(r, ctx);
     if (ctx->force) {
@@ -2223,11 +2254,32 @@ l1_cache_handle_request(ngx_http_request_t *r,
     }
     ctx->lookup = 1;
 
+    /* What: Avoids stale L1/L2 reuse while a purged fill is still publishing.
+     * Why: The native PURGE can race an unfinished cache-file write.
+     */
+    if (l1_cache_has_pending_l2_purge(&ctx->key)) {
+        ctx->request_bypass = 1;
+        ctx->request_no_store = 1;
+        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
+        return ctx->request_only_if_cached ? NGX_HTTP_GATEWAY_TIME_OUT
+                                           : NGX_DECLINED;
+    }
+
     rc = l1_cache_lookup(r, &ctx->key);
     if (rc == NGX_DECLINED && ctx->request_only_if_cached
         && !ctx->only_if_cached_peer_guard)
     {
         return NGX_HTTP_GATEWAY_TIME_OUT;
+    }
+    if (rc == NGX_DECLINED && l1_cache_track_request(r, ctx) != NGX_OK)
+    {
+        /* What: Bypasses both cache tiers when invalidation tracking fails.
+         * Why: An untracked fill could republish an object after PURGE.
+         */
+        ctx->tracking_failed = 1;
+        ctx->request_bypass = 1;
+        ctx->request_no_store = 1;
+        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
     }
     return rc;
 }
@@ -2241,6 +2293,9 @@ l1_cache_proxy_content_handler(ngx_http_request_t *r)
     ngx_http_l1_cache_ctx_t *ctx;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx != NULL && ctx->internal_l2_purge_check) {
+        return l1_cache_l2_purge_check_content_handler(r);
+    }
     if (ctx != NULL && ctx->internal_l2_purge) {
         return ngx_http_proxy_cache_purge_handler(r);
     }
@@ -2266,12 +2321,18 @@ l1_cache_proxy_content_handler(ngx_http_request_t *r)
  * Why: NGINX exposes no public file-cache purge API.
  */
 static ngx_int_t
-l1_cache_start_l2_purge(ngx_http_request_t *r)
+l1_cache_start_l2_purge(ngx_http_request_t *r, ngx_str_t *proxy_key,
+    ngx_http_l1_cache_capture_t *capture)
 {
     static ngx_str_t method = ngx_string("PURGE");
     ngx_http_request_t *sr;
     ngx_http_l1_cache_ctx_t *ctx;
+    ngx_http_post_subrequest_t *ps;
     ngx_str_t uri, args;
+
+    if (proxy_key == NULL || proxy_key->len == 0) {
+        return NGX_ERROR;
+    }
 
     ctx = ngx_pcalloc(r->pool, sizeof(*ctx));
     if (ctx == NULL) {
@@ -2280,7 +2341,17 @@ l1_cache_start_l2_purge(ngx_http_request_t *r)
 
     uri = r->uri;
     args = r->args;
-    if (ngx_http_subrequest(r, &uri, &args, &sr, NULL,
+    ps = NULL;
+    if (capture != NULL) {
+        ps = ngx_palloc(r->pool, sizeof(*ps));
+        if (ps == NULL) {
+            return NGX_ERROR;
+        }
+        ps->handler = l1_cache_l2_purge_post_subrequest;
+        ps->data = capture;
+    }
+
+    if (ngx_http_subrequest(r, &uri, &args, &sr, ps,
                             NGX_HTTP_SUBREQUEST_BACKGROUND) != NGX_OK)
     {
         return NGX_ERROR;
@@ -2289,8 +2360,124 @@ l1_cache_start_l2_purge(ngx_http_request_t *r)
     sr->method = NGX_HTTP_UNKNOWN;
     sr->method_name = method;
     ctx->r = sr;
+    ctx->proxy_key = *proxy_key;
+    ctx->proxy_key_ready = 1;
     ctx->internal_l2_purge = 1;
     ngx_http_set_ctx(sr, ctx, ngx_http_l1_cache_module);
+
+    return NGX_OK;
+}
+
+
+/* What: Checks for a racing PURGE after native cache finalization.
+ * Why: The purge may arrive just after the output filter's first check.
+ */
+static ngx_int_t
+l1_cache_start_l2_purge_check(ngx_http_request_t *r, ngx_str_t *proxy_key,
+    ngx_http_l1_cache_capture_t *capture)
+{
+    static ngx_str_t method = ngx_string("PURGE");
+    ngx_http_request_t *sr;
+    ngx_http_l1_cache_ctx_t *ctx;
+    ngx_http_post_subrequest_t *ps;
+    ngx_str_t uri, args;
+
+    if (proxy_key == NULL || proxy_key->len == 0 || capture == NULL) {
+        return NGX_ERROR;
+    }
+
+    ctx = ngx_pcalloc(r->pool, sizeof(*ctx));
+    ps = ngx_palloc(r->pool, sizeof(*ps));
+    if (ctx == NULL || ps == NULL) {
+        return NGX_ERROR;
+    }
+
+    uri = r->uri;
+    args = r->args;
+    ps->handler = l1_cache_l2_purge_check_post_subrequest;
+    ps->data = ctx;
+    if (ngx_http_subrequest(r, &uri, &args, &sr, ps,
+                            NGX_HTTP_SUBREQUEST_BACKGROUND) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    sr->method = NGX_HTTP_UNKNOWN;
+    sr->method_name = method;
+    ctx->r = sr;
+    ctx->proxy_key = *proxy_key;
+    ctx->proxy_key_ready = 1;
+    ctx->capture = capture;
+    ctx->internal_l2_purge_check = 1;
+    ngx_http_set_ctx(sr, ctx, ngx_http_l1_cache_module);
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+l1_cache_l2_purge_check_content_handler(ngx_http_request_t *r)
+{
+    ngx_http_l1_cache_ctx_t *ctx;
+    ngx_flag_t pending;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
+    if (ctx == NULL || ctx->capture == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    l1_cache_lock(&l1_cache_conf->shpool->mutex);
+    ctx->capture->flags |= L1_CAPTURE_POST_COMMIT;
+    pending = (ctx->capture->flags & L1_CAPTURE_PURGE_PENDING) != 0;
+    ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+
+    if (pending) {
+        ctx->purge_check_performed = 1;
+        ctx->internal_l2_purge = 1;
+        return ngx_http_proxy_cache_purge_handler(r);
+    }
+
+    return ngx_http_send_response(r, NGX_HTTP_NO_CONTENT, NULL, NULL);
+}
+
+
+static ngx_int_t
+l1_cache_l2_purge_check_post_subrequest(ngx_http_request_t *r, void *data,
+    ngx_int_t rc)
+{
+    ngx_http_l1_cache_ctx_t *ctx = data;
+
+    if (ctx->purge_check_performed) {
+        return l1_cache_l2_purge_post_subrequest(r, ctx->capture, rc);
+    }
+
+    return NGX_OK;
+}
+
+
+/* What: Releases the per-key bypass after native L2 purge completion.
+ * Why: Requests must not read the in-flight representation before purging.
+ */
+static ngx_int_t
+l1_cache_l2_purge_post_subrequest(ngx_http_request_t *r, void *data,
+    ngx_int_t rc)
+{
+    ngx_http_l1_cache_capture_t *capture = data;
+    ngx_uint_t status;
+
+    status = r->headers_out.status;
+    if ((status < NGX_HTTP_OK || status >= NGX_HTTP_BAD_REQUEST)
+        && status != NGX_HTTP_NOT_FOUND
+        && status != NGX_HTTP_PRECONDITION_FAILED)
+    {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "l1 cache deferred native L2 purge failed: %i (%ui)",
+                      rc, status);
+        return NGX_OK;
+    }
+
+    l1_cache_lock(&l1_cache_conf->shpool->mutex);
+    capture->flags &= ~L1_CAPTURE_PURGE_PENDING;
+    ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
 
     return NGX_OK;
 }
@@ -2316,7 +2503,7 @@ l1_cache_request_key(ngx_http_request_t *r, ngx_str_t *key)
 
 static void
 l1_cache_invalidate(ngx_str_t *key,
-    ngx_http_l1_cache_capture_t *preserve)
+    ngx_http_l1_cache_capture_t *preserve, ngx_flag_t purge_l2)
 {
     ngx_queue_t *q;
     ngx_http_l1_cache_entry_t *entry;
@@ -2330,6 +2517,10 @@ l1_cache_invalidate(ngx_str_t *key,
     }
 
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
+    if (purge_l2) {
+        (void) ngx_atomic_fetch_add(
+            &l1_cache_conf->sh->purge_generation, 1);
+    }
 
     if (key == NULL) {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->generation, 1);
@@ -2351,6 +2542,11 @@ l1_cache_invalidate(ngx_str_t *key,
             && ngx_memcmp(capture_key, key->data, key->len) == 0)
         {
             capture->flags |= L1_CAPTURE_CANCELLED;
+            if (purge_l2
+                && !(capture->flags & L1_CAPTURE_POST_COMMIT))
+            {
+                capture->flags |= L1_CAPTURE_PURGE_PENDING;
+            }
         }
     }
 
@@ -2995,6 +3191,8 @@ l1_cache_purge_request(ngx_http_request_t *r, ngx_str_t *key,
     ngx_http_l1_cache_capture_t *capture;
     size_t capture_key_len;
     u_char *capture_key;
+    ngx_flag_t l2_pending;
+    ngx_flag_t full_zone;
 
     if (l1_cache_conf == NULL || l1_cache_conf->sh == NULL)
         return NGX_HTTP_SERVICE_UNAVAILABLE;
@@ -3023,15 +3221,23 @@ l1_cache_purge_request(ngx_http_request_t *r, ngx_str_t *key,
     }
     if (!authorized) return NGX_HTTP_FORBIDDEN;
 
+    l2_pending = 0;
+    full_zone = r->uri.len == 1 && r->uri.data[0] == '/' && r->args.len == 0;
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
-    if (r->uri.len == 1 && r->uri.data[0] == '/' && r->args.len == 0) {
+    if (full_zone) {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->generation, 1);
+        (void) ngx_atomic_fetch_add(
+            &l1_cache_conf->sh->purge_generation, 1);
         for (q = ngx_queue_head(&l1_cache_conf->sh->captures);
              q != ngx_queue_sentinel(&l1_cache_conf->sh->captures);
              q = ngx_queue_next(q))
         {
             capture = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
             capture->flags |= L1_CAPTURE_CANCELLED;
+            if (!(capture->flags & L1_CAPTURE_POST_COMMIT)) {
+                capture->flags |= L1_CAPTURE_PURGE_PENDING;
+                l2_pending = 1;
+            }
         }
         queues[0] = &l1_cache_conf->sh->probation;
         queues[1] = &l1_cache_conf->sh->protected;
@@ -3048,6 +3254,8 @@ l1_cache_purge_request(ngx_http_request_t *r, ngx_str_t *key,
             }
         }
     } else if (key != NULL) {
+        (void) ngx_atomic_fetch_add(
+            &l1_cache_conf->sh->purge_generation, 1);
         for (q = ngx_queue_head(&l1_cache_conf->sh->captures);
              q != ngx_queue_sentinel(&l1_cache_conf->sh->captures);
              q = ngx_queue_next(q))
@@ -3058,6 +3266,10 @@ l1_cache_purge_request(ngx_http_request_t *r, ngx_str_t *key,
                 && ngx_memcmp(capture_key, key->data, key->len) == 0)
             {
                 capture->flags |= L1_CAPTURE_CANCELLED;
+                if (!(capture->flags & L1_CAPTURE_POST_COMMIT)) {
+                    capture->flags |= L1_CAPTURE_PURGE_PENDING;
+                    l2_pending = 1;
+                }
             }
         }
 
@@ -3073,10 +3285,38 @@ l1_cache_purge_request(ngx_http_request_t *r, ngx_str_t *key,
     }
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
 
+    if (l2_pending && !full_zone) {
+        /* What: Responds from the content phase with HTTP 202.
+         * Why: Phase handlers cannot finalize a 2xx status as a response.
+         */
+        r->content_handler = l1_cache_purge_accepted_handler;
+        return NGX_DECLINED;
+    }
+
     /* What: Continues into the configured native L2 purge handler.
      * Why: Proxy cache exposes no public module purge API.
      */
     return NGX_DECLINED;
+}
+
+
+/* What: Reports that a fill-racing purge has been accepted for completion.
+ * Why: The active fill's post-commit native purge runs asynchronously.
+ */
+static ngx_int_t
+l1_cache_purge_accepted_handler(ngx_http_request_t *r)
+{
+    static u_char body[] = "Purge accepted; active fill will be purged.\n";
+    ngx_str_t content_type;
+    ngx_http_complex_value_t response;
+
+    ngx_str_set(&content_type, "text/plain");
+    ngx_memzero(&response, sizeof(response));
+    response.value.data = body;
+    response.value.len = sizeof(body) - 1;
+
+    return ngx_http_send_response(r, NGX_HTTP_ACCEPTED, &content_type,
+                                  &response);
 }
 
 
@@ -3595,6 +3835,7 @@ l1_cache_admit_response(ngx_http_request_t *r,
     ngx_http_proxy_loc_conf_t *plcf;
 
     if (ctx == NULL || ctx->admit || ctx->hit || !ctx->lookup
+        || ctx->tracking_failed
         || r->main->method != NGX_HTTP_GET
         || (r != r->main && !slice)
         || !l1_cache_request_allowed(r->main, slice, ctx->force, ctx)
@@ -3650,6 +3891,16 @@ l1_cache_admit_response(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
+    if (ctx->capture != NULL
+        && (ctx->capture->flags & L1_CAPTURE_TRACK_ONLY)
+        && (ctx->capture->flags
+            & (L1_CAPTURE_CANCELLED | L1_CAPTURE_PURGE_PENDING)))
+    {
+        ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->rejected, 1);
+        return NGX_DECLINED;
+    }
+
     /* What: Allows one active capture per key.
      * Why: Duplicate fills consume bounded memory.
      */
@@ -3658,6 +3909,12 @@ l1_cache_admit_response(ngx_http_request_t *r,
          q = ngx_queue_next(q))
     {
         active = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
+        if (active == ctx->capture) {
+            continue;
+        }
+        if (active->flags & L1_CAPTURE_TRACK_ONLY) {
+            continue;
+        }
         active_key = l1_cache_capture_key(active, &active_key_len);
         if (!(active->flags & L1_CAPTURE_CANCELLED)
             && active->generation == ctx->generation
@@ -3680,36 +3937,48 @@ l1_cache_admit_response(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
-    ctx->capture = ngx_slab_alloc_locked(l1_cache_conf->shpool,
-                                          capture_alloc);
     if (ctx->capture == NULL) {
-        ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+        ctx->capture = ngx_slab_alloc_locked(l1_cache_conf->shpool,
+                                              capture_alloc);
+        if (ctx->capture == NULL) {
+            ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+            (void) ngx_atomic_fetch_add(
+                &l1_cache_conf->sh->allocation_failures, 1);
+            l1_cache_mark_error_fallback(ctx);
+            (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->rejected, 1);
+            return NGX_DECLINED;
+        }
+        ctx->capture->pid = ngx_pid;
+        ctx->capture->generation = ctx->generation;
+        ctx->capture->key_len = ctx->key.len;
+        ngx_memcpy(ctx->capture->key, ctx->key.data, ctx->key.len);
+        ngx_queue_insert_head(&l1_cache_conf->sh->captures,
+                              &ctx->capture->queue);
+    } else {
+        ctx->capture->flags &= ~L1_CAPTURE_TRACK_ONLY;
         (void) ngx_atomic_fetch_add(
-            &l1_cache_conf->sh->allocation_failures, 1);
-        l1_cache_mark_error_fallback(ctx);
-        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->rejected, 1);
-        return NGX_DECLINED;
+            &l1_cache_conf->sh->tracked_requests, -1);
+        ctx->tracked = 0;
     }
 
-    ctx->capture->pid = ngx_pid;
-    ctx->capture->generation = ctx->generation;
     ctx->capture->bytes_or_entry = reserve;
-    ctx->capture->key_len = ctx->key.len;
     ctx->capture->flags = 0;
-    ngx_memcpy(ctx->capture->key, ctx->key.data, ctx->key.len);
-    ngx_queue_insert_head(&l1_cache_conf->sh->captures,
-                          &ctx->capture->queue);
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building_bytes, reserve);
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building, 1);
     ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
 
     ctx->reserved = 1;
     ctx->reserved_bytes = reserve;
-    cleanup = ngx_pool_cleanup_add(r->pool, 0);
+    cleanup = ctx->capture_cleanup;
+    if (cleanup == NULL) {
+        cleanup = ngx_pool_cleanup_add(r->pool, 0);
+        if (cleanup != NULL) {
+            ctx->capture_cleanup = cleanup;
+        }
+    }
     if (cleanup != NULL) {
         cleanup->handler = l1_cache_finalize_capture;
         cleanup->data = ctx;
-        ctx->capture_cleanup = cleanup;
     }
 
     ctx->body = ngx_pnalloc(r->pool, reserve);
@@ -3839,9 +4108,10 @@ l1_cache_header_filter(ngx_http_request_t *r)
         && r->headers_out.status >= NGX_HTTP_OK
         && r->headers_out.status < NGX_HTTP_BAD_REQUEST)
     {
-        l1_cache_invalidate(&ctx->key, NULL);
+        l1_cache_invalidate(&ctx->key, NULL,
+                            ctx->purge_l2_after_response);
         if (ctx->purge_l2_after_response && r == r->main
-            && l1_cache_start_l2_purge(r) != NGX_OK)
+            && l1_cache_start_l2_purge(r, &ctx->proxy_key, NULL) != NGX_OK)
         {
             ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
                           "l1 cache could not schedule native L2 purge");
@@ -3939,12 +4209,34 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         return l1_cache_next_body_filter(r, in);
     }
 
-    if (ctx == NULL || !ctx->admit || ctx->complete) {
+    if (ctx == NULL || ctx->complete) {
+        return l1_cache_next_body_filter(r, in);
+    }
+
+    if (!ctx->admit) {
+        if (!ctx->tracked) {
+            return l1_cache_next_body_filter(r, in);
+        }
+
+        complete = 0;
+        for (cl = in; cl != NULL; cl = cl->next) {
+            if (cl->buf->last_buf || cl->buf->last_in_chain) {
+                complete = 1;
+                break;
+            }
+        }
+        if (complete) {
+            ctx->complete = 1;
+                (void) l1_cache_schedule_post_commit_check(r, ctx);
+        }
         return l1_cache_next_body_filter(r, in);
     }
 
     complete = 0;
     for (cl = in; cl != NULL; cl = cl->next) {
+        if (cl->buf->last_buf || cl->buf->last_in_chain) {
+            complete = 1;
+        }
         if (ngx_buf_size(cl->buf) == 0) {
             continue;
         }
@@ -3963,8 +4255,7 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
         if (n) ngx_memcpy(ctx->body + ctx->len, cl->buf->pos, n);
         ctx->len += n;
-        if (cl->buf->last_buf || cl->buf->last_in_chain
-            || ctx->len == ctx->expected_len)
+        if (ctx->len == ctx->expected_len)
             complete = 1;
     }
 
@@ -3974,6 +4265,8 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             l1_cache_release_capture(ctx);
         } else {
             ctx->complete = 1;
+            (void) l1_cache_schedule_post_commit_check(r, ctx);
+
             if (ctx->l2_miss && !ctx->l2_revalidated
                 && l1_cache_defer_capture_finalize(r, ctx) != NGX_OK)
             {
@@ -4034,7 +4327,7 @@ l1_cache_finalize_capture(void *data)
             /* What: Preserves this fill during key invalidation.
              * Why: The active response may publish the replacement object.
              */
-            l1_cache_invalidate(&ctx->key, ctx->capture);
+            l1_cache_invalidate(&ctx->key, ctx->capture, 0);
         }
         l1_cache_store_capture(ctx);
     }
@@ -4420,8 +4713,12 @@ l1_cache_release_capture(void *data)
     ngx_http_l1_cache_ctx_t *ctx = data;
     ngx_http_l1_cache_entry_t *entry;
 
-    if (ctx->reserved) {
+    if (ctx->reserved || ctx->tracked) {
+        ngx_flag_t reserved;
+
+        reserved = ctx->reserved;
         ctx->reserved = 0;
+        ctx->tracked = 0;
         l1_cache_lock(&l1_cache_conf->shpool->mutex);
         ngx_queue_remove(&ctx->capture->queue);
         if (ctx->capture->flags & L1_CAPTURE_HAS_ENTRY) {
@@ -4431,9 +4728,15 @@ l1_cache_release_capture(void *data)
                 l1_cache_free_entry_locked(entry);
             }
         }
-        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building, -1);
-        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building_bytes,
-                                   -((ngx_atomic_int_t) ctx->reserved_bytes));
+        if (reserved) {
+            (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building, -1);
+            (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building_bytes,
+                                       -((ngx_atomic_int_t)
+                                         ctx->reserved_bytes));
+        } else {
+            (void) ngx_atomic_fetch_add(
+                &l1_cache_conf->sh->tracked_requests, -1);
+        }
         ngx_slab_free_locked(l1_cache_conf->shpool, ctx->capture);
         ctx->capture = NULL;
         ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
@@ -4455,6 +4758,143 @@ l1_cache_capture_key(ngx_http_l1_cache_capture_t *capture, size_t *len)
 
     *len = capture->key_len;
     return capture->key;
+}
+
+
+/* What: Tracks an eligible L2 request before its response headers arrive.
+ * Why: PURGE must see fills even when L1 later rejects their response body.
+ */
+static ngx_int_t
+l1_cache_track_request(ngx_http_request_t *r, ngx_http_l1_cache_ctx_t *ctx)
+{
+    ngx_pool_cleanup_t *cleanup;
+    ngx_queue_t *q;
+    ngx_http_l1_cache_capture_t *capture, *active;
+    size_t alloc, active_key_len;
+    u_char *active_key;
+
+    if (ctx->capture != NULL || ctx->key.len == 0 || ctx->key.len > 8192) {
+        return NGX_ERROR;
+    }
+
+    alloc = offsetof(ngx_http_l1_cache_capture_t, key) + ctx->key.len;
+    l1_cache_lock(&l1_cache_conf->shpool->mutex);
+    l1_cache_reap_captures_locked();
+    if (ctx->purge_generation != l1_cache_conf->sh->purge_generation
+        || l1_cache_conf->sh->tracked_requests >= L1_MAX_TRACKED_REQUESTS)
+    {
+        ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+        return NGX_ERROR;
+    }
+
+    for (q = ngx_queue_head(&l1_cache_conf->sh->captures);
+         q != ngx_queue_sentinel(&l1_cache_conf->sh->captures);
+         q = ngx_queue_next(q))
+    {
+        active = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
+        if (!(active->flags & L1_CAPTURE_PURGE_PENDING)) {
+            continue;
+        }
+        active_key = l1_cache_capture_key(active, &active_key_len);
+        if (active_key_len == ctx->key.len
+            && ngx_memcmp(active_key, ctx->key.data, ctx->key.len) == 0)
+        {
+            ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+            return NGX_ERROR;
+        }
+    }
+
+    capture = ngx_slab_alloc_locked(l1_cache_conf->shpool, alloc);
+    if (capture == NULL) {
+        ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+        (void) ngx_atomic_fetch_add(
+            &l1_cache_conf->sh->allocation_failures, 1);
+        return NGX_ERROR;
+    }
+
+    capture->pid = ngx_pid;
+    capture->generation = ctx->generation;
+    capture->bytes_or_entry = 0;
+    capture->key_len = ctx->key.len;
+    capture->flags = L1_CAPTURE_TRACK_ONLY;
+    ngx_memcpy(capture->key, ctx->key.data, ctx->key.len);
+    ngx_queue_insert_head(&l1_cache_conf->sh->captures, &capture->queue);
+    (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->tracked_requests, 1);
+    ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+
+    ctx->capture = capture;
+    ctx->tracked = 1;
+    cleanup = ngx_pool_cleanup_add(r->pool, 0);
+    if (cleanup == NULL) {
+        l1_cache_release_capture(ctx);
+        return NGX_ERROR;
+    }
+    cleanup->handler = l1_cache_release_capture;
+    cleanup->data = ctx;
+    ctx->capture_cleanup = cleanup;
+
+    return NGX_OK;
+}
+
+
+/* What: Schedules native PURGE after the tracked response finishes.
+ * Why: NGINX may publish its cache file after output filters complete.
+ */
+static ngx_int_t
+l1_cache_schedule_post_commit_check(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->capture == NULL || ctx->l2_purge_scheduled) {
+        return NGX_OK;
+    }
+
+    if (!ctx->proxy_key_ready
+        || l1_cache_start_l2_purge_check(r, &ctx->proxy_key,
+                                         ctx->capture) != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "l1 cache could not schedule post-commit L2 check");
+        return NGX_ERROR;
+    }
+
+    ctx->l2_purge_scheduled = 1;
+    return NGX_OK;
+}
+
+
+/* What: Blocks reuse while a matching fill awaits its deferred L2 purge.
+ * Why: Otherwise another request could observe the just-committed stale file.
+ */
+static ngx_flag_t
+l1_cache_has_pending_l2_purge(ngx_str_t *key)
+{
+    ngx_queue_t *q;
+    ngx_http_l1_cache_capture_t *capture;
+    size_t capture_key_len;
+    u_char *capture_key;
+
+    l1_cache_lock(&l1_cache_conf->shpool->mutex);
+
+    for (q = ngx_queue_head(&l1_cache_conf->sh->captures);
+         q != ngx_queue_sentinel(&l1_cache_conf->sh->captures);
+         q = ngx_queue_next(q))
+    {
+        capture = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
+        if (!(capture->flags & L1_CAPTURE_PURGE_PENDING)) {
+            continue;
+        }
+
+        capture_key = l1_cache_capture_key(capture, &capture_key_len);
+        if (capture_key_len == key->len
+            && ngx_memcmp(capture_key, key->data, key->len) == 0)
+        {
+            ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+            return 1;
+        }
+    }
+
+    ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+    return 0;
 }
 
 
@@ -4494,9 +4934,14 @@ l1_cache_reap_captures_locked(void)
             l1_cache_free_entry_locked((ngx_http_l1_cache_entry_t *)
                                        (uintptr_t) capture->bytes_or_entry);
         }
-        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building, -1);
-        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building_bytes,
-                                   -((ngx_atomic_int_t) bytes));
+        if (capture->flags & L1_CAPTURE_TRACK_ONLY) {
+            (void) ngx_atomic_fetch_add(
+                &l1_cache_conf->sh->tracked_requests, -1);
+        } else {
+            (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building, -1);
+            (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->building_bytes,
+                                       -((ngx_atomic_int_t) bytes));
+        }
         ngx_slab_free_locked(l1_cache_conf->shpool, capture);
     }
 }

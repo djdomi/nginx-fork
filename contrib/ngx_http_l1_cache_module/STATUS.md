@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r44.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r53.
 
 ## Pre-search reasoning record (r22)
 
@@ -536,3 +536,77 @@ Wrapper.
 Das APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r44.apk`. Der Testlauf
 verwendete temporäre Dateien unter `/tmp/l1-slice-fix-XbkDGt`; es wurden keine
 dauerhaften Testdateien hinzugefügt.
+
+## Pre-search reasoning record (r45)
+
+Der einmalige Lauf `/tmp/l1-purge-active-fill-r44-29GuM6` zeigte, dass ein
+autorisierter PURGE während eines noch laufenden Origin-Fills vom nativen
+Purge-Handler mit 412 beantwortet wird. Nach Abschluss des alten Fills traf ein
+Folge-GET dennoch L2 und lieferte die alte Repräsentation. Der L1-Capture wird
+zwar abgebrochen, aber das native L2-Objekt kann nach dem PURGE noch
+veröffentlicht werden. Als maßgeblicher L2-Owner bleibt NGINX samt dem
+installierten Purge-Modul erhalten; das L1-Modul soll aktive Captures markieren,
+nach dem nativen Cache-Commit einen weiteren nativen PURGE einplanen und
+währenddessen L1/L2-Wiederverwendung für denselben Schlüssel umgehen.
+
+Vor Änderungen wurden `l1_cache_purge_request()`,
+`l1_cache_invalidate()`, `l1_cache_finalize_capture()`,
+`l1_cache_body_filter()`, `l1_cache_start_l2_purge()` und die native
+`ngx_http_upstream_process_request()`-Reihenfolge durchsucht. Der alte
+`ngx_http_ram_cache_module`-Ansatz enthält keine entsprechende Funktion.
+NGINX aktualisiert den nativen Cache in `ngx_http_upstream_process_request()`;
+ein Hintergrund-Subrequest, der im letzten Body-Filter-Callback eingereiht
+wird, läuft erst nach Abschluss des aktuellen Event-Handlers. Die Änderung
+erweitert daher den bestehenden PURGE-Owner, statt einen eigenen L2-Writer oder
+Cache-Datei-Zugriff einzuführen. Der einmalige Fehlerlauf wurde durch
+Verzeichnisrechte des Testaufbaus nicht verursacht: nach Korrektur der Rechte
+bestätigte ein separater Lauf den 412-/L2-HIT-Befund.
+
+## r49–r51: PURGE während eines nicht in L1 aufnehmbaren Fills
+
+Die erste Race-Korrektur verfolgte nur Responses, für die nach den Headern ein
+L1-Capture angelegt wurde. Damit fehlte eine PURGE-Erkennung bei großen,
+L1-unfähigen oder anderweitig nicht aufnehmbaren Antworten. Das Modul legt nun
+beim L1-Miss vor der Origin-/L2-Antwort einen kleinen Shared-Memory-Tracker an.
+Ein erfolgreicher Body-Capture übernimmt diesen Datensatz; andernfalls bleibt
+er bis zum Stream-Ende bestehen und kann eine native L2-PURGE-Nachbearbeitung
+auslösen. Die Anzahl gleichzeitiger Tracker ist auf 4096 begrenzt. Bei
+Kapazitäts- oder Allokationsfehlern werden L1- und L2-Cache für diese Anfrage
+umgangen, damit kein nicht überwachter Fill nach einem PURGE gespeichert wird.
+Eine purge_generation schützt außerdem gegen Requests, die ihren Kontext vor
+PURGE angelegt, den Tracker aber erst danach versucht haben anzulegen.
+
+Bei einem PURGE mit aktivem Fill antwortet der Modulpfad mit HTTP 202 und
+startet die native Cache-PURGE nach Abschluss des Response-Streams. NGINX-
+Cache-Dateien bleiben vollständig im Besitz des nativen Proxy- und Purge-Moduls.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r49 dynamisches APK | PASS | Gebaut und auf Alpine-NGINX 1.30.6-r0 installiert; unverändertes System-NGINX `nginx -t` erfolgreich. APK-SHA-256 `b4a809f47c006691f5d365bc88c5bce7d8923e0abe798e3b496756e1de3ecebc`. |
+| Aktiver L1-fähiger Fill | PASS für diesen Lauf | Stock-NGINX 1.30.6, zwei Worker, PURGE bei laufendem 512-KiB-Fill: HTTP 202; gleichzeitige Anfrage `BYPASS`; danach neuer Wert wurde als `L1_MISS_L2_MISS` und anschließend `L1_HIT` ausgeliefert. SHA-256-Werte und Ablauf des r49-Laufs sind im vorherigen Arbeitsprotokoll festgehalten; temporär `/tmp/l1-purge-active-fill-r49-GaOXxk`. |
+| r50 Build und Modul-Ladetest | PASS | `NGINX_MOD_PKGREL=50 abuild -r` erfolgreich, dynamisches Modul gebaut und integrierter `nginx -t` erfolgreich. SHA-256 `959088ae21a18ef8d689bd8f054775a942b5230bceb0ed88ce8eb42ee0235c36`. |
+| PURGE mit 4-MiB-Antwort, L1-Maximum 1 MiB | PASS für diesen Lauf | Stock-NGINX 1.30.6, L1 bewusst nicht aufnahmefähig; bei 540041 bereits ausgelieferten Bytes kam PURGE mit HTTP 202 zurück. Eine Anfrage während des offenen PURGE wurde `BYPASS` und lieferte den neuen Body. Nach Ende des Fills war der nächste gespeicherte Body bytegleich zum neuen Wert; der Folgezugriff war `L1_MISS_L2_HIT` mit demselben SHA-256 `238689effabcdf972b61cbf9bebf0e459dc073db16a2c6895ec615426603aa59`. Temporär `/tmp/l1-purge-unadmitted-r50-1`; Access-Log bestätigt Frontend MISS, BYPASS, MISS, danach HIT. |
+| r51 gezielter HTTP-Cache-/Ladetest | PASS | Einbezug der `only-if-cached` Miss-Weiterleitung in die Vorab-Tracker-Erstellung kompiliert; r51 gegen `nginx-mod-dev-1.30.6-r0` gebaut, `apk verify` OK, installiert und unverändertes `/etc/nginx/nginx.conf` mit `nginx -t` erfolgreich. SHA-256 `8d349111ad01867a7932cddf60d76342461fc7527d7d72649a9deeceb380de59`. |
+| PURGE-/Invalidierungsabnahme insgesamt | OPEN | Der gezielte Lauf deckt einen großen, nicht L1-aufnehmbaren Response-Fill sowie einen aktiven normalen Fill ab. Vollständige Rennen mit L2-Revalidierung/304, Client-Abbruch, mehreren gleichzeitigen Writes desselben Keys und Tracker-Allokationsfehlern sind nicht nachgewiesen. |
+
+Das r51-Paket liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r51.apk`.
+
+## r52–r53: Race zwischen Filterende und L2-Commit schließen
+
+Ein PURGE kann nach dem ersten End-of-body-Check und noch vor dem nativen
+L2-Commit eintreffen. Jeder beendete Stream reiht deshalb nun einen
+Hintergrund-Subrequest ein, der nach dem aktuellen NGINX-Event-Handler läuft.
+Er markiert den Shared-Memory-Tracker als `POST_COMMIT` und prüft dann die
+PURGE-Markierung: Ist sie gesetzt, ruft er den nativen Purge-Handler auf und
+lässt den Post-Subrequest-Callback die Sperrmarkierung erst nach Erfolg
+entfernen. Ist sie nicht gesetzt, liefert der Check 204. Ein späterer PURGE
+sieht `POST_COMMIT` und geht direkt durch den nativen PURGE-Pfad.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r52 APK-Build, Installation und Modulstart | PASS | Alpine `nginx-mod-dev` 1.30.6-r0, musl; APK-Signatur `apk verify` OK; installiert über r51; unverändertes System-NGINX `nginx -t` erfolgreich. SHA-256 `c0aec7a1fc0e21f60040660f0ac3344632b64cba7f47d9ee2f619dc101462bc2`. |
+| PURGE während nicht L1-aufnehmbarem Fill mit nachgelagertem Commit-Check | PASS für diesen Lauf | Stock-NGINX 1.30.6 mit 2 Workern, Body 512 KiB bei L1-Maximum 128 KiB. Beim PURGE waren 60108 Bytes angekommen; PURGE antwortete 202. Anfrage während des Fills: `BYPASS`, Body-SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Der erste Fill lieferte den alten Body (`160f9907667a6fd29f8cd787355bca09699203bab04dab1541101d5d5bfbf4fa`). Nach seinem Ende: neuer Body als `L1_MISS_L2_MISS`, dann derselbe Body als `L1_MISS_L2_HIT`; beide SHA-256 entsprachen der neuen Datei. Temporär `/tmp/l1-purge-check-r52-1`. |
+| r53 Build und NGINX-Modulprüfung | PASS | Nach Entfernung eines nicht mehr benutzten Pending-Flag-Helfers erneut gegen Alpine-`nginx-mod-dev` 1.30.6-r0 gebaut; integrierte Modulinitialisierung erfolgreich. APK-Signatur `apk verify` OK, installiert über r52; unverändertes System-NGINX `nginx -t` erfolgreich. SHA-256 `2d4bc96630f7fb82f1af04c3ae3fb8e50aed692154ee1468b7bc10164149c942`. |
+| Vollständige PURGE-Race-Abnahme | OPEN | Der gezielte Fill deckt einen großen, nicht in L1 aufnehmbaren Origin-Fill über den nachgelagerten Commit-Check ab. 304-Revalidierung, Abbruch, mehrere gleichzeitige Writes desselben Keys sowie absichtlicher Shared-Memory-Mangel sind nicht abgenommen. |
+
+Das r53-Paket liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r53.apk`.
