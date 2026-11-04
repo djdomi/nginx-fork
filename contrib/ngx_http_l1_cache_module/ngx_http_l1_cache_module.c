@@ -4973,6 +4973,7 @@ l1_cache_has_pending_l2_purge(ngx_str_t *key,
 
     *retry = NULL;
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
+    l1_cache_reap_captures_locked();
 
     for (q = ngx_queue_head(&l1_cache_conf->sh->captures);
          q != ngx_queue_sentinel(&l1_cache_conf->sh->captures);

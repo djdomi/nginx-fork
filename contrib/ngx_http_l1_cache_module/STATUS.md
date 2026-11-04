@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r58.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r59.
 
 ## Pre-search reasoning record (r22)
 
@@ -702,3 +702,21 @@ umgehen beide Cache-Schichten und lösen einen erneuten nativen PURGE aus.
 | Gesamtstatus Invalidierung und RFC | OPEN | Die gezielte Subrequest-Erstellungsfehler-Injektion (r57) und der native PURGE-Fehlercallback (r58) sind nachgewiesen. Worker-Abbruch im Tombstonepfad und weitere Invalidierungs-, RFC- und Konkurrenzfälle bleiben offen. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r58.apk`.
+
+## r59: verwaiste PURGE-Tombstones vor der Sperrprüfung bereinigen
+
+Die PURGE-Sperrprüfung reapte verwaiste Worker-Captures bisher nicht selbst.
+Ein Worker konnte daher mit `CHECK_FAILED | PURGE_PENDING` sterben, ohne dass
+ein späterer Request den Capture in den persistenten Retry-Tombstone
+umwandelte. `l1_cache_has_pending_l2_purge()` ruft jetzt unter derselben
+Shared-Memory-Sperre die vorhandene Capture-Bereinigung auf, bevor es nach dem
+Schlüssel sucht. Das Wiederherstellen des Tombstones und die Sperrprüfung
+bleiben atomar.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r59 APK-Build und Installation | PASS | Alpine `nginx-mod-dev=1.30.6-r0`; `apk verify` OK; über r58 installiert. Das unveränderte System-NGINX 1.30.6 bestand `nginx -t`. APK-SHA-256 `644ec452725c82f8e8dbb5609973b58f8da0cb985146244c8fb88bd8c559d88f`. |
+| PURGE, fehlgeschlagener Post-Commit-Check, Worker-Abbruch | PASS für diesen gezielten Ablauf | Zwei Worker; langsamer 512-KiB-Fill; PURGE während des Fills: HTTP 202. Ein temporärer Modulbuild ließ den Post-Commit-Check für den PURGE-betroffenen Capture fehlschlagen; der Worker wurde während des Fehlerpfads mit SIGKILL beendet. Der erste Folgezugriff war `BYPASS`; anschließend folgten `L1_MISS_L2_MISS` und `L1_MISS_L2_HIT`. Insgesamt drei Origin-GETs einschließlich des abgebrochenen Ersttransfers. Die drei vollständigen Folge-Bodies zu je 524288 Byte waren bytegleich, SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Temporärer Lauf `/tmp/l1-postcommit-fail.uyr2ct/run11`; Fehler-Injektion war nicht im APK. |
+| Vollständige Invalidierungs- und RFC-Abnahme | OPEN | Der gezielte Worker-Abbruchfall ist nun nachgewiesen. Weitere PURGE-Rennen, 304-Revalidierung, parallele Fills, Speicherfehler und die vollständige RFC-Matrix bleiben offen. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r59.apk`.
