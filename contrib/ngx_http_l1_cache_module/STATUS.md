@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r59.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r61.
 
 ## Pre-search reasoning record (r22)
 
@@ -720,3 +720,35 @@ bleiben atomar.
 | Vollständige Invalidierungs- und RFC-Abnahme | OPEN | Der gezielte Worker-Abbruchfall ist nun nachgewiesen. Weitere PURGE-Rennen, 304-Revalidierung, parallele Fills, Speicherfehler und die vollständige RFC-Matrix bleiben offen. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r59.apk`.
+
+## r60: NULL-Komplexwert im internen L2-PURGE-Check korrigieren
+
+Ein gezielter PURGE-/Abbruchlauf auf r59 löste einen SIGSEGV aus. Der
+Backtrace zeigte `ngx_http_complex_value()` aus dem unveränderten NGINX-Kern,
+aufgerufen von `ngx_http_send_response()` im Modulhandler
+`l1_cache_l2_purge_check_content_handler()`: Der Modulaufruf übergab `NULL` als
+Komplexwert, obwohl NGINX ihn dereferenziert. r60 übergibt nun einen
+initialisierten leeren `ngx_http_complex_value_t`.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r60 APK-Build, Installation und Konfiguration | PASS | Gegen Alpine `nginx-mod-dev=1.30.6-r0` gebaut; `apk verify` OK; über r59 installiert; unverändertes System-NGINX bestand `nginx -t`. APK-SHA-256 `8f31a8623f0799b845ecddf87f080c9c621d0c91cace463e9215f7100bc785b4`. |
+| Korrigierter interner PURGE-Response-Aufruf | PASS für gezielten Lauf | Reale Requests auf installiertem Modul ohne den zuvor reproduzierten SIGSEGV. Die breitere PURGE-/Client-Abbruch-Abnahme blieb offen und wurde mit r61 gezielt fortgesetzt. |
+
+## r61: L1-Aufnahme nach abgeschlossenem L2-Commit finalisieren
+
+Ein gezielter Lauf zeigte, dass der alte Capture-Cleanup nach dem internen
+L2-Commit-Check nicht zuverlässig abgeschlossen wurde. Dadurch blieb die
+reservierte Building-Kapazität belegt und eine nachfolgende Aufnahme wurde
+abgelehnt. Der Post-Subrequest-Callback finalisiert jetzt einen vollständigen,
+zugelassenen Capture nach dem L2-Check und deaktiviert dabei den verzögerten
+Cleanup-Handler, damit kein doppelter Finalizer ausgeführt wird.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r61 Build, APK-Verifikation, Installation und `nginx -t` | PASS | Alpine musl, `nginx-1.30.6-r0`; installiert über r60. APK-SHA-256 `ae5cceb9f9d0ac1bc0c49148f23b25702bf7a03a9fceac567b0e9cdef56542e1`. |
+| Vollständige 512-KiB-Origin-Aufnahme | PASS für gezielten Lauf | Stock-NGINX 1.30.6, zwei Worker: erster Request `L1_MISS_L2_MISS`, nächste zwei `L1_HIT`; `admission_accepted=1`, `admission_rejected=0`, `building=0`, genau ein Origin-GET. Alle drei Bodies waren 524288 Byte und hatten SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. |
+| Client-Abbruch während Capture und PURGE | PASS für Abbruchannahme; Folgepromotion OPEN | Bei 512-KiB-Response brach curl nach 2 s mit Code 28 und 48524 empfangenen Bytes ab; gleichzeitiger autorisierter PURGE antwortete HTTP 202. Danach erfolgte ein vollständiger Origin-/L2-Fill mit bytegleichem 524288-Byte-Body (SHA-256 wie oben). Die erste Folgeantwort war `BYPASS`, die nächste `L1_MISS_L2_HIT`; ein L1-HIT nach dieser konkreten PURGE-Sequenz wurde nicht nachgewiesen. Origin-Log zeigt zwei vollständige GETs; kein SIGSEGV im Frontend-Log. Temporärer Lauf `/tmp/l1-client-abort-purge-r61`. |
+| Gesamtabnahme PURGE/RFC/Stock-Modul | OPEN | Der konkrete Client-Abbruch erzeugte keinen Modulabsturz und PURGE antwortete 202. Die anschließende L1-Promotion in dieser Sequenz ist nicht belegt. Weitere RFC-, Conditional-, 304-, Varianten-, Fehler- und ABI-Abnahmepunkte bleiben wie zuvor offen. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r61.apk`.

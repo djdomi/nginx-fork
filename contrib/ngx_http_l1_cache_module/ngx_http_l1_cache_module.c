@@ -306,6 +306,8 @@ static ngx_int_t l1_cache_l2_purge_check_content_handler(
     ngx_http_request_t *r);
 static ngx_int_t l1_cache_l2_purge_check_post_subrequest(
     ngx_http_request_t *r, void *data, ngx_int_t rc);
+static void l1_cache_finalize_capture_after_l2_check(
+    ngx_http_request_t *r);
 static ngx_int_t l1_cache_l2_purge_post_subrequest(ngx_http_request_t *r,
     void *data, ngx_int_t rc);
 static void l1_cache_invalidate(ngx_str_t *key,
@@ -2443,6 +2445,7 @@ static ngx_int_t
 l1_cache_l2_purge_check_content_handler(ngx_http_request_t *r)
 {
     ngx_http_l1_cache_ctx_t *ctx;
+    ngx_http_complex_value_t response;
     ngx_flag_t pending;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_l1_cache_module);
@@ -2461,7 +2464,8 @@ l1_cache_l2_purge_check_content_handler(ngx_http_request_t *r)
         return ngx_http_proxy_cache_purge_handler(r);
     }
 
-    return ngx_http_send_response(r, NGX_HTTP_NO_CONTENT, NULL, NULL);
+    ngx_memzero(&response, sizeof(response));
+    return ngx_http_send_response(r, NGX_HTTP_NO_CONTENT, NULL, &response);
 }
 
 
@@ -2472,10 +2476,37 @@ l1_cache_l2_purge_check_post_subrequest(ngx_http_request_t *r, void *data,
     ngx_http_l1_cache_ctx_t *ctx = data;
 
     if (ctx->purge_check_performed) {
-        return l1_cache_l2_purge_post_subrequest(r, ctx->capture, rc);
+        rc = l1_cache_l2_purge_post_subrequest(r, ctx->capture, rc);
     }
 
-    return NGX_OK;
+    l1_cache_finalize_capture_after_l2_check(r);
+    return rc;
+}
+
+
+/* What: Finalizes admitted bodies when the L2 check completes.
+ * Why: The native L2 commit state is available at this point.
+ */
+static void
+l1_cache_finalize_capture_after_l2_check(ngx_http_request_t *r)
+{
+    ngx_http_l1_cache_ctx_t *ctx;
+
+    if (r->parent == NULL) {
+        return;
+    }
+
+    ctx = ngx_http_get_module_ctx(r->parent, ngx_http_l1_cache_module);
+    if (ctx == NULL || !ctx->admit || !ctx->complete
+        || ctx->capture_cleanup == NULL
+        || ctx->capture_cleanup->handler != l1_cache_finalize_capture)
+    {
+        return;
+    }
+
+    ctx->capture_cleanup->handler = NULL;
+    ctx->capture_cleanup = NULL;
+    l1_cache_finalize_capture(ctx);
 }
 
 
@@ -4353,6 +4384,7 @@ l1_cache_defer_capture_finalize(ngx_http_request_t *r,
     cleanup->handler = l1_cache_finalize_capture;
     cleanup->data = ctx;
     ctx->capture_cleanup->handler = NULL;
+    ctx->capture_cleanup = cleanup;
     ctx->capture_finalizer_deferred = 1;
 
     return NGX_OK;
