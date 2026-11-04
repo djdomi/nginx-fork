@@ -5,6 +5,11 @@ in-memory L1 response cache in an NGINX shared-memory zone. The configured
 `proxy_cache` remains the normal persistent L2 cache; the module does not
 replace or write to NGINX's file-cache internals.
 
+The module processes HTTP requests after NGINX terminates client TLS. It can
+also cache responses from an HTTPS upstream. It does not configure transparent
+traffic redirection, certificate interception, or client certificate trust;
+those remain NGINX and network configuration responsibilities.
+
 ## Build
 
 Configure NGINX with the slice module and this dynamic module, then build the
