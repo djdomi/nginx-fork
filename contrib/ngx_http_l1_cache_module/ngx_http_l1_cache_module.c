@@ -216,6 +216,8 @@ typedef struct {
     ngx_uint_t   only_if_cached_peer_guard:1;
     ngx_uint_t   only_if_cached_peer_blocked:1;
     ngx_uint_t   only_if_cached_body_replaced:1;
+    ngx_uint_t   capture_finalizer_deferred:1;
+    ngx_pool_cleanup_t *capture_cleanup;
     ngx_http_l1_cache_capture_t *capture;
 } ngx_http_l1_cache_ctx_t;
 
@@ -286,6 +288,8 @@ static void l1_cache_release_pin(ngx_http_l1_cache_pin_t *pin);
 static void l1_cache_reap_pins_locked(ngx_flag_t force);
 static void l1_cache_release_capture(void *data);
 static void l1_cache_finalize_capture(void *data);
+static ngx_int_t l1_cache_defer_capture_finalize(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx);
 static void l1_cache_store_capture(ngx_http_l1_cache_ctx_t *ctx);
 static void l1_cache_copy_capture_body(ngx_http_l1_cache_entry_t *entry,
     u_char *body) __attribute__((noinline));
@@ -3414,6 +3418,7 @@ l1_cache_admit_response(ngx_http_request_t *r,
     if (cleanup != NULL) {
         cleanup->handler = l1_cache_finalize_capture;
         cleanup->data = ctx;
+        ctx->capture_cleanup = cleanup;
     }
 
     ctx->body = ngx_pnalloc(r->pool, reserve);
@@ -3678,9 +3683,48 @@ l1_cache_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             l1_cache_release_capture(ctx);
         } else {
             ctx->complete = 1;
+            if (ctx->l2_miss && !ctx->l2_revalidated
+                && l1_cache_defer_capture_finalize(r, ctx) != NGX_OK)
+            {
+                ctx->admit = 0;
+                l1_cache_release_capture(ctx);
+                (void) ngx_atomic_fetch_add(
+                    &l1_cache_conf->sh->rejected, 1);
+            }
         }
     }
     return l1_cache_next_body_filter(r, in);
+}
+
+
+/* What: Runs new-fill verification after native cache publication.
+ * Why: The proxy's temp-file cleanup is registered after header filtering.
+ */
+static ngx_int_t
+l1_cache_defer_capture_finalize(ngx_http_request_t *r,
+    ngx_http_l1_cache_ctx_t *ctx)
+{
+    ngx_pool_cleanup_t *cleanup;
+
+    if (ctx->capture_finalizer_deferred) {
+        return NGX_OK;
+    }
+
+    if (ctx->capture_cleanup == NULL) {
+        return NGX_ERROR;
+    }
+
+    cleanup = ngx_pool_cleanup_add(r->pool, 0);
+    if (cleanup == NULL) {
+        return NGX_ERROR;
+    }
+
+    cleanup->handler = l1_cache_finalize_capture;
+    cleanup->data = ctx;
+    ctx->capture_cleanup->handler = NULL;
+    ctx->capture_finalizer_deferred = 1;
+
+    return NGX_OK;
 }
 
 
@@ -3714,8 +3758,13 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
 {
     ngx_http_cache_t *c;
     ngx_http_file_cache_t *cache;
+    ngx_http_upstream_t *u;
+    ngx_temp_file_t *tf;
+    ngx_file_info_t fi;
+    ngx_file_uniq_t write_uniq;
     time_t now;
     ngx_uint_t identity_matches;
+    ngx_uint_t request_file_matches;
 
     if (ctx == NULL || ctx->r == NULL || (c = ctx->r->cache) == NULL
         || c->node == NULL || (cache = c->file_cache) == NULL)
@@ -3724,7 +3773,20 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
     }
 
     now = ngx_time();
+    request_file_matches = 0;
+    write_uniq = 0;
+    if (ctx->l2_miss && !ctx->l2_revalidated
+        && (u = ctx->r->upstream) != NULL && u->pipe != NULL
+        && (tf = u->pipe->temp_file) != NULL
+        && tf->file.fd != NGX_INVALID_FILE
+        && ngx_fd_info(tf->file.fd, &fi) != NGX_FILE_ERROR)
+    {
+        write_uniq = ngx_file_uniq(&fi);
+    }
+
     ngx_shmtx_lock(&cache->shpool->mutex);
+    request_file_matches = write_uniq != 0
+                           && c->node->uniq == write_uniq;
     /* What: Matches a committed write to its new node generation.
      * Why: Stock NGINX leaves request uniq at the old value.
      */
@@ -3736,7 +3798,7 @@ l1_cache_update_l2_state(ngx_http_l1_cache_ctx_t *ctx)
         || (ctx->l2_miss && ctx->l2_revalidated && c->uniq != 0
             && c->node->uniq == c->uniq)
         || (ctx->l2_miss && !ctx->l2_revalidated && c->updated
-            && c->node->uniq != 0 && c->node->uniq != c->uniq);
+            && request_file_matches);
     ctx->l2_persisted = c->node->exists && c->node->uniq != 0
                         && identity_matches
                         && c->valid_sec > now && !c->purged

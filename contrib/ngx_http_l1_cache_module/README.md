@@ -44,14 +44,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r23.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r24.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r23.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r24.apk
 sudo nginx -t
 ```
 
@@ -153,7 +153,7 @@ NGINX's normal response path, and the peer-init guard stops an L2 miss before
 origin selection and converts it to 504. A variable `proxy_pass` target has
 no safe static peer hook, so an L1 miss returns 504 without starting proxy
 processing. Active `proxy_cache_bypass` and unsupported methods also fail
-closed. The installed r23 package was verified on Stock NGINX 1.30.6: a
+closed. The installed r24 package was verified on Stock NGINX 1.30.6: a
 variable-target origin fill produced a byte-identical `L1_HIT`, an uncached
 `only-if-cached` request returned 504 without an origin request, and a failed
 L2 file write did not publish an L1 object.

@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
-Stand: Arbeitsbranch auf Basis `c59350be6`, Alpine x86_64,
-`nginx-1.30.6-r0`, musl.
+Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
+`nginx-1.30.6-r0`, musl; aktuelles Paket r24.
 
 ## Pre-search reasoning record (r22)
 
@@ -235,18 +235,40 @@ in the current dynamic module.
 
 `I confirm I did not violate [AG-CODE-011]. I reasoned BEFORE searching and identified the exact question as whether each current core hunk still has an owner in the installable module or is an independent fix; searched BEFORE all 14 core-file diffs, the initial feature commit, native NGINX 1.30.6 cache/proxy/slice/filter paths, and every custom request-field/API reference in the current module; found the legacy callback bridge, several independent synchronization/HTTP fixes, and no dynamic-module references to custom core fields or purge API; preserved module ownership in the dynamic module and native L2 ownership in stock NGINX; no core change was classified as required by r23. I am aware that equivalent behavior MUST have exactly one canonical owner, and I have read and applied [AG-LAW-001] in full.`
 
+## Pre-search reasoning record (r27)
+
+The remaining L2-publication concern is attribution of a successful native
+file-cache write to the same request whose response body is being promoted.
+The sole module owner is `l1_cache_update_l2_state()`; NGINX's native owner is
+`ngx_http_file_cache_update()`. Before editing, I searched the module for all
+L2-persistence checks, capture finalizers, temp-file use, and cache writers,
+then inspected the packaged NGINX 1.30.6 source. It sets `c->updated` before
+rename and assigns `node->uniq` from `fstat()` on the writer's temp-file FD;
+there is no public callback exposing a per-request commit result. The previous
+nonzero-generation check therefore could attribute a concurrent writer's
+generation to the current capture. I retained NGINX as the sole disk writer
+and chose to compare its committed node identity with this request's own temp
+FD after native cache update; missing or mismatched identity must reject L1.
+
+After the edit, the source search found one deferred capture finalizer and one
+L2 identity verifier. The r24 package built and loaded on stock Alpine NGINX;
+one targeted origin-fill test, one PURGE/generation test, and one L2-write-
+failure test passed. The results and boundaries are recorded below. This keeps
+the native file-cache writer as the single L2 owner; no parallel file format or
+writer was introduced.
+
 ## Nachweise und Status
 
 | Anforderung | Status | Nachweis / Grenze |
 |---|---|---|
-| Dynamischer Build ohne NGINX-Kernänderungen | PASS | `abuild -r` baut das Modul gegen `/usr/src/nginx-1.30.6`; NGINX-Binary bleibt das installierte Alpine-Paket. |
-| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r23.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild, echte Proxy-Konfiguration und reguläre Systemkonfiguration bestanden `nginx -t`. Letztere meldet eine nicht fatale `variables_hash`-Warnung. |
+| Dynamischer Build ohne NGINX-Kernänderungen | PASS | r24 wurde mit `abuild -r` gegen `/usr/src/nginx-1.30.6` gebaut; NGINX-Binary bleibt das installierte Alpine-Paket. Der PR enthält keine `src/`-Änderungen. |
+| Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r24.apk` installiert; APK-Signaturprüfung erfolgreich; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; reale Proxy-Konfiguration und reguläre Systemkonfiguration bestanden `nginx -t`. Letztere meldet eine nicht fatale `variables_hash`-Warnung. |
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
-| L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Einmaliger gezielter Lauf mit installiertem r23 auf unverändertem Alpine-NGINX 1.30.6-r0, zwei Workern und 8-MiB-Body: Während der langsame alte L2-HIT ausgeliefert wurde, erfolgte PURGE und ein neuer Origin-Fill. Der Folgerequest war `L1_MISS_L2_HIT` und lieferte den neuen Body, nicht den alten. Alter Body SHA-256 `38f9d816627d9dffa5f1d41d176c890d0e02a555cb31a5982bbdcd27816d84be`; neuer Body SHA-256 `2daeb1f36095b44b318410b3f4e8b5d989dcc7bb023d1426c492dab0a3053e74`; Origin-Requests: 2; alle fünf HTTP-Antworten 200. Temporärer Lauf: `/tmp/l1-l2-generation-r23-oneoff`, Ergebnisse: `/tmp/l1-l2-generation-r23-results`. |
+| L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Einmaliger gezielter Lauf mit r24 auf unverändertem Alpine-NGINX 1.30.6-r0, zwei Workern und 8-MiB-Body: Während der langsame alte L2-HIT ausgeliefert wurde, erfolgte PURGE und ein neuer Origin-Fill. Der Folgerequest war `L1_MISS_L2_HIT` und lieferte den neuen Body, nicht den alten. Alter Body SHA-256 `b07d46f33098743aa2b2e6f67e356c57694bb37b13e431bf9181e46a6e734aae`; neuer Body SHA-256 `2daeb1f36095b44b318410b3f4e8b5d989dcc7bb023d1426c492dab0a3053e74`; Origin-Requests: 2; alle fünf HTTP-Antworten 200. Temporärer Lauf: `/tmp/l1-l2-generation-r24`, Ergebnisse: `/tmp/l1-l2-generation-r24-results`. |
 | Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt exakt `proxy_cache_key $l1_cache_key` und die passende Cache-Zone. Gezielt abweichender Proxy-Key: L2 MISS/HIT, `X-L1-Hits: 0`, bytegleiche Antworten, genau ein Origin-Request; L1 wurde sicher umgangen. |
-| L2-Schreibfehler | PASS | r23-Lauf mit nach dem Start schreibgeschütztem L2-Verzeichnis: zwei 200-Antworten blieben `L1_MISS_L2_MISS`, zwei Origin-Requests und zwei native Schreibfehler; kein L1-HIT. |
-| Origin-MISS speichert zuerst L2 und befüllt danach L1 | PASS für getesteten Stock-Pfad | r23 auf unverändertem Alpine NGINX 1.30.6-r0: variabler `proxy_pass`, erfolgreicher L2-MISS und folgender bytegleicher `L1_HIT`; ein ungefüllter `only-if-cached`-Schlüssel lieferte 504 ohne Origin-Request. |
+| L2-Schreibfehler | PASS | Einmaliger gezielter Lauf mit installiertem r24 auf Stock-NGINX 1.30.6-r0: Cache-Verzeichnis nach Start schreibgeschützt; beide Requests HTTP 200 `L1_MISS_L2_MISS`, identische Bodies (SHA-256 `e1d33c8b9b1c8c7cf075d1570642c7dbe6d0e0bc3e9caf7adb77dc5c2c4bf2b3`), zwei Origin-Requests und zwei native Rename-Fehler. Kein L1-HIT nach fehlendem L2-Commit. `/tmp/l1-l2-writefail-r24`. |
+| Origin-MISS speichert zuerst L2 und befüllt danach L1 | PASS für getesteten Stock-Pfad | r24 auf unverändertem Alpine-NGINX 1.30.6-r0, zwei Worker: erster Request `L1_MISS_L2_MISS`, zweiter `L1_HIT`, identische Bodies (SHA-256 `2ffeb80aea49257626a26aba1c7c7987368338ed88272fd177d57ed46416778e`), genau ein Origin-Request und eine bestätigte Aufnahme. Ein ungefüllter `only-if-cached`-Schlüssel lieferte im r23-Lauf 504 ohne Origin-Request. |
 | `only-if-cached` bei variablem `proxy_pass` | PASS für getesteten Pfad | r23: Variable-Ziel lieferte vorhandenes READY-Objekt als `L1_HIT`; ein L1-MISS gab 504 zurück, bevor die Proxy-Location den Origin startete. |
 | `proxy_cache_bypass` / `proxy_no_cache` | PASS | r8-Lauf: benutzerdefinierter Bypass ergab `BYPASS`, invalidierte L1; Folgezugriff war `L1_MISS_L2_HIT`. `proxy_no_cache` verhinderte wiederholte L1-Aufnahme. |
 | Force-Preconditions und Isolation | PASS für geprüfte Fälle | Vorhandener Lauf: If-None-Match→304, If-Match→412; Force-Varianten mit Cookie/Vary wurden getrennt. |
@@ -314,15 +336,29 @@ Diese Einordnung entfernt oder verwirft keine unabhängigen Änderungen aus dem 
 
 Der ältere Ansatz ist ein technischer Beleg für Filterintegration ohne Core-Hooks, aber wegen Schlüssel- und Funktionsunterschieden kein vollständiger Ersatz.
 
+## r24-Zuordnung des nativen L2-Commits
+
+Stock-NGINX 1.30.6 setzt `c->updated` vor dem Dateiumbenennen und schreibt
+anschließend `node->uniq` aus `fstat()` des nativen Temp-Datei-FDs. Eine bloße
+Prüfung auf `c->updated` und eine neue, nicht-null Cache-Identität konnte bei
+parallelen Schreibern den Commit eines anderen Requests zuordnen. r24 verschiebt
+die Capture-Finalisierung hinter das native Cache-Update. Danach wird unter dem
+L2-Cache-Lock `node->uniq` mit der Inode-Identität des Temp-FDs genau dieses
+Requests verglichen. Fehlt der FD oder stimmt die Identität nicht, wird kein
+L1-Objekt veröffentlicht. Der gezielte Origin-Fill-Test bestätigte Commit,
+Aufnahme und anschließenden L1-HIT; der PURGE-/Neubefüllungslauf bestätigte,
+dass eine neuere L2-Generation keinen alten Capture als L1-HIT veröffentlicht.
+Der gezielte r24-L2-Schreibfehlerlauf bestätigte HTTP-Weiterleitung ohne L1-Veröffentlichung.
+
 ## Paket
 
-Aktuelles getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r23.apk`
-(SHA-256 `c8ac76abd5ffc3f417aecc8c37e7cee0fe00e3147d282934c37791f8f44a62e4`).
-Es wurde gegen Alpine `nginx-mod-dev-1.30.6-r0` gebaut und über r22 installiert.
+Aktuelles getestetes Artefakt: `alpine/dist/nginx-mod-l1-cache-1.30.6-r24.apk`
+(SHA-256 `2cb6679ac1b7149a10a18bd22989fe6e4e7881ad43bce0ddd7580db0081becb4`).
+Es wurde gegen Alpine `nginx-mod-dev-1.30.6-r0` gebaut und über r23 installiert.
 Der passende öffentliche Signaturschlüssel liegt daneben. Der private
 Buildschlüssel wird nicht ausgeliefert. Das Paket hängt exakt von
 `nginx=1.30.6-r0` und `nginx-mod-http-cache-purge=1.30.6-r0` ab.
-Das r23-Paket wurde installiert; die reale Konfiguration und der System-Autoload
+Das r24-Paket wurde installiert; die reale Konfiguration und der System-Autoload
 bestanden `nginx -t`. `apk verify` bestätigte die Paketintegrität.
 
 ## Gesamtstatus
