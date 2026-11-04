@@ -482,3 +482,22 @@ umgangen.
 | Doppelte Age-Feldzeilen | PASS | Zwei `Age`-Header (`5` und `999`): erste Antwort L2-MISS; zweite L2-HIT; beide Responses behielten beide Felder und keinen L1-HIT; Bodies bytegleich. |
 | Laufzeitumgebung | PASS | Stock-NGINX 1.30.6, zwei konfigurierte Worker, temporärer Test `/tmp/l1-r42-age-strict-20261104a`; kein dauerhafter Testcode hinzugefügt. |
 | Vollständige Age-/RFC-Abnahme | OPEN | Der Nachweis deckt die zwei fehlerhaften Formen ab. Die übrigen RFC-9111-Semantiken bleiben separat offen; erfolgreiche Age-Altersläufe werden nicht wiederholt. |
+
+## Unsafe-Methoden-Invalidierung bei deaktiviertem L1
+
+Der Request-Handler prüfte zuvor die L1-Aktivierung und die normale
+L1-Proxy-Konfiguration, bevor er Unsafe-Methoden für Invalidierung vormerkte.
+Ein `l1_cache off`-Pfad konnte deshalb einen identischen Shared-Cache-Key aus
+einer anderen Location im RAM und auf Disk stehen lassen. Die bestehende
+Identitätsprüfung ist jetzt von der Request-Bypass-Prüfung getrennt. Für jede
+Location mit passendem `$l1_cache_key`, L2-Zone und Cache-Purge-Handler wird
+die Invalidierung auch dann vorbereitet, wenn L1 dort ausgeschaltet oder der
+Request regulär gebypasst ist. Die L2-Purge-Option ist für solche gemeinsam
+genutzten Keys zwingend. GET, HEAD, OPTIONS und TRACE lösen keine Unsafe-
+Invalidierung aus.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r43 Alpine-Paket | PASS | `NGINX_MOD_PKGREL=43 abuild -r` erfolgreich; Paket gegen Alpine-NGINX 1.30.6-r0 gebaut, installiert und mit `apk verify` bestätigt. SHA-256 `3a3ac2e9d0ce1c3bb7d6c8d812abf3723231af4fd51863770b14c328275a792a`. |
+| POST aus einer `l1_cache off`-Location | PASS für geprüfte Konfiguration | GET in aktivierter Location: L2-MISS; zweiter GET: L1-HIT; POST über getrennte `l1_cache off`-Location mit identischem L1/L2-Key: 204; Folge-GET: L2-MISS. Origin-Log exakt GET/POST/GET; GET-Bodies bytegleich. Stock-NGINX 1.30.6, temporärer Lauf `/tmp/l1-r43-disabled-location-invalidation-20261104a`. |
+| Vollständige Unsafe-Methoden-/Invalidierungsabnahme | OPEN | Geprüft wurden erfolgreiche POST-Antworten in aktivierter und deaktivierter Location. Andere Statuscodes, Methoden und Race-Konstellationen bleiben unbewertet. Bereits bestandene Läufe wurden nicht wiederholt. |

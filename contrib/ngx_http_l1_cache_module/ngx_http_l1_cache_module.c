@@ -253,6 +253,9 @@ static ngx_int_t l1_cache_stat_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t l1_cache_key_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_flag_t l1_cache_method_unsafe(ngx_http_request_t *r);
+static ngx_flag_t l1_cache_proxy_identity_matches(ngx_http_request_t *r,
+    ngx_http_l1_cache_loc_conf_t *lcf);
 static ngx_flag_t l1_cache_proxy_config_matches(ngx_http_request_t *r,
     ngx_http_l1_cache_loc_conf_t *lcf, ngx_flag_t *cache_bypass);
 static ngx_int_t l1_cache_zone_variable(ngx_http_request_t *r,
@@ -719,14 +722,23 @@ l1_cache_key_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
 
 static ngx_flag_t
-l1_cache_proxy_config_matches(ngx_http_request_t *r,
-    ngx_http_l1_cache_loc_conf_t *lcf, ngx_flag_t *cache_bypass)
+l1_cache_method_unsafe(ngx_http_request_t *r)
+{
+    return r->method != NGX_HTTP_GET
+           && r->method != NGX_HTTP_HEAD
+           && r->method != NGX_HTTP_OPTIONS
+           && r->method != NGX_HTTP_TRACE;
+}
+
+
+static ngx_flag_t
+l1_cache_proxy_identity_matches(ngx_http_request_t *r,
+    ngx_http_l1_cache_loc_conf_t *lcf)
 {
     static u_char key_variable[] = "$l1_cache_key";
     ngx_http_proxy_loc_conf_t *plcf;
     ngx_str_t zone;
 
-    *cache_bypass = 0;
     plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
     if (plcf == NULL || plcf->upstream.cache == 0
         || plcf->cache_key.value.len != sizeof(key_variable) - 1
@@ -734,15 +746,6 @@ l1_cache_proxy_config_matches(ngx_http_request_t *r,
                       sizeof(key_variable) - 1) != 0)
     {
         return 0;
-    }
-
-    if (plcf->upstream.cache_bypass != NULL) {
-        if (ngx_http_test_predicates(r, plcf->upstream.cache_bypass)
-            != NGX_OK)
-        {
-            *cache_bypass = 1;
-            return 0;
-        }
     }
 
     if (plcf->upstream.cache_value != NULL) {
@@ -760,6 +763,29 @@ l1_cache_proxy_config_matches(ngx_http_request_t *r,
     if (zone.len != lcf->l2_zone.len
         || ngx_memcmp(zone.data, lcf->l2_zone.data, zone.len) != 0)
     {
+        return 0;
+    }
+
+    return 1;
+}
+
+
+static ngx_flag_t
+l1_cache_proxy_config_matches(ngx_http_request_t *r,
+    ngx_http_l1_cache_loc_conf_t *lcf, ngx_flag_t *cache_bypass)
+{
+    ngx_http_proxy_loc_conf_t *plcf;
+
+    *cache_bypass = 0;
+    if (!l1_cache_proxy_identity_matches(r, lcf)) {
+        return 0;
+    }
+
+    plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
+    if (plcf->upstream.cache_bypass != NULL
+        && ngx_http_test_predicates(r, plcf->upstream.cache_bypass) != NGX_OK)
+    {
+        *cache_bypass = 1;
         return 0;
     }
 
@@ -1336,11 +1362,33 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->enabled, prev->enabled,
                          mcf != NULL && mcf->zone != NULL);
     ngx_conf_merge_value(conf->force, prev->force, 0);
-    ngx_conf_merge_value(conf->purge_l2, prev->purge_l2, conf->enabled);
+    ngx_conf_merge_value(conf->purge_l2, prev->purge_l2,
+                         mcf != NULL && mcf->zone != NULL);
     if (conf->l2_zone.len == 0) conf->l2_zone = prev->l2_zone;
     if (conf->key == NULL) conf->key = prev->key;
     if (conf->proxy_content_handler == NULL) {
         conf->proxy_content_handler = prev->proxy_content_handler;
+    }
+
+    plcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_proxy_module);
+    if (mcf != NULL && mcf->zone != NULL
+        && conf->l2_zone.len != 0 && conf->key != NULL
+        && plcf != NULL && plcf->upstream.cache
+        && plcf->cache_key.value.len == sizeof("$l1_cache_key") - 1
+        && ngx_memcmp(plcf->cache_key.value.data, "$l1_cache_key",
+                      sizeof("$l1_cache_key") - 1) == 0)
+    {
+        if (!conf->purge_l2) {
+            return "l1_cache_l2_purge cannot be disabled for a shared cache key";
+        }
+        clcf = ngx_http_conf_get_module_loc_conf(cf,
+                                                  ngx_http_core_module);
+        location = ngx_array_push(&mcf->l1_locations);
+        if (location == NULL) {
+            return NGX_CONF_ERROR;
+        }
+        location->clcf = clcf;
+        location->lcf = conf;
     }
 
     if (conf->enabled) {
@@ -1355,21 +1403,6 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         }
         if (!conf->purge_l2) {
             return "l1_cache_l2_purge cannot be disabled for an L1 cache";
-        }
-        plcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_proxy_module);
-        if (plcf != NULL && plcf->upstream.cache
-            && plcf->cache_key.value.len == sizeof("$l1_cache_key") - 1
-            && ngx_memcmp(plcf->cache_key.value.data, "$l1_cache_key",
-                          sizeof("$l1_cache_key") - 1) == 0)
-        {
-            clcf = ngx_http_conf_get_module_loc_conf(cf,
-                                                      ngx_http_core_module);
-            location = ngx_array_push(&mcf->l1_locations);
-            if (location == NULL) {
-                return NGX_CONF_ERROR;
-            }
-            location->clcf = clcf;
-            location->lcf = conf;
         }
         if (plcf != NULL && plcf->upstream.cache_bypass != NULL) {
             predicate = plcf->upstream.cache_bypass->elts;
@@ -2098,6 +2131,17 @@ l1_cache_handle_request(ngx_http_request_t *r,
     }
     ngx_http_set_ctx(r, ctx, ngx_http_l1_cache_module);
 
+    /* What: Tracks unsafe requests even when L1 is disabled or bypassed.
+     * Why: Their successful response must invalidate any shared L1/L2 key.
+     */
+    if (l1_cache_method_unsafe(r)
+        && l1_cache_proxy_identity_matches(r, lcf)
+        && l1_cache_request_key(r, &ctx->key) == NGX_OK)
+    {
+        ctx->invalidate_after_response = 1;
+        ctx->purge_l2_after_response = lcf->purge_l2;
+    }
+
     cache_bypass = 0;
     if (lcf->enabled && !l1_cache_proxy_config_matches(
                             r, lcf, &cache_bypass))
@@ -2154,10 +2198,6 @@ l1_cache_handle_request(ngx_http_request_t *r,
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->requests, 1);
 
     if (r->method != NGX_HTTP_GET && r->method != NGX_HTTP_HEAD) {
-        if (l1_cache_request_key(r, &ctx->key) == NGX_OK) {
-            ctx->invalidate_after_response = 1;
-            ctx->purge_l2_after_response = lcf->purge_l2;
-        }
         return NGX_DECLINED;
     }
 
