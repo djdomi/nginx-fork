@@ -524,6 +524,11 @@ Wrapper.
 | APK-Installation und Verifikation | PASS | r44 über r43 installiert; `apk verify` meldet `OK`. SHA-256 `01200a254b77487bd4118d3e849142224d650c60dd60ac251b763d82ec392a41`. |
 | Gezielte Slice-Konkurrenzprüfung | PASS für diesen Lauf | Installiertes r44 auf unverändertem Alpine-NGINX 1.30.6, zwei Worker, 100 parallele Clients, 16-KiB-Slices, 262144-Byte-Objekt. Alle 100 Bodies bytegleich; SHA-256 `30e6369451b7999d37b91cba152ddf6df9f0a0eaf14c72a6e344f23b47c993a8`. Access-Log: 1600 `L1_HIT`-Slice-Antworten. |
 | Worker-Abstürze im gezielten Lauf | PASS für diesen Lauf | Fehlerlog enthält keinen SIGSEGV oder Signal-11-Abbruch; beide Worker beendeten sich beim regulären NGINX-Shutdown mit Exit-Code 0. |
+| Suffix-Range `bytes=-100` | PASS für diesen Lauf | HTTP 206, `Content-Range: bytes 262044-262143/262144`; 100 Bytes bytegleich zum Ende der Quelldatei. |
+| `If-Range` mit aktuellem ETag | PASS für diesen Lauf | HTTP 206, `Content-Range: bytes 0-10/262144`; 11 Bytes bytegleich. L1 meldete `BYPASS`; native NGINX-Verarbeitung blieb maßgeblich. |
+| `If-Range` mit veraltetem Validator | PASS für diesen Lauf | HTTP 200 und kompletter Body bytegleich zur 262144-Byte-Quelle; L1 meldete `BYPASS`. |
+| Nicht erfüllbare Range `bytes=262144-` | PASS für diesen Lauf | HTTP 416 mit `Content-Range: bytes */262144`. |
+| Zwei nicht überlappende Ranges | PASS als nativer Fallback | Anfrage `bytes=0-10,32760-32780` erhielt HTTP 200; kompletter Body war bytegleich zur Quelle und L1 lieferte keinen Teilbody. RFC 9110 §14.2 erlaubt das Ignorieren einer `Range`-Anfrage; die zunächst erwartete 206-Antwort war keine normative Pflicht. |
 | Aussage zu den zeitgleichen SIGSEGVs | OPEN | Der korrigierte Lauf besteht den gezielten Fall, ist aber kein Stacktrace und beweist nicht rückwirkend, dass der zeitgleiche SIGSEGV aus genau diesem Testlauf oder derselben Ursache stammt. Breitere Konkurrenz- und Langzeitabnahme bleibt offen. |
 
 Das APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r44.apk`. Der Testlauf
