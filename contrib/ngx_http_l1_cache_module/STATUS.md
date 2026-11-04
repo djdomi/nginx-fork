@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r24.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r43.
 
 ## Pre-search reasoning record (r22)
 
