@@ -186,8 +186,8 @@ second cache writer or lookup implementation.
 
 ## Pre-search reasoning record (r26)
 
-The next review classifies every NGINX core file changed between the PR branch
-and `origin/master`. The r23 module now builds, loads, and serves tested L1/L2
+The review classified every NGINX core file changed between the PR branch
+and `origin/master` at that time. The r23 module now builds, loads, and serves tested L1/L2
 requests against the installed unmodified Alpine NGINX 1.30.6 package. This is
 evidence that those core changes are not required by the shipped module path;
 it does not by itself show whether each change is an independent correction.
@@ -199,14 +199,14 @@ installable module and its package, not an NGINX core fork.
 
 ### r26 complete core-diff classification
 
-The current branch differs from `origin/master` in 14 core files, not 15.
+At the start of that review, the branch differed from `origin/master` in 14 core files, not 15.
 `ngx_http_not_modified_filter_module.c` was changed in the original feature
 commit but has no net diff at the current HEAD. The r23 module's Alpine APK
 was built against the packaged unmodified NGINX 1.30.6 sources, installed with
 the original binary, and exercised through real L1/L2 requests. Thus none of
 the current core hunks is required by the shipped dynamic module.
 
-| Core file | Current hunk responsibility | Classification | PR decision |
+| Core file | Historical hunk responsibility | Classification | PR decision |
 |---|---|---|---|
 | `src/core/ngx_module.h` | Adds ABI signature bit for new request fields | Legacy module bridge only | Remove from module PR |
 | `src/core/ngx_spinlock.c` | Removes racy non-atomic lock reads before CAS | Independent synchronization fix | Exclude; original commit remains in history |
@@ -243,7 +243,7 @@ in the current dynamic module.
 | Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r23.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild, echte Proxy-Konfiguration und reguläre Systemkonfiguration bestanden `nginx -t`. Letztere meldet eine nicht fatale `variables_hash`-Warnung. |
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
-| L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Mit r18 lieferte ein langsamer Client noch den alten 8-MiB-L2-Body aus, während der native L2-Schlüssel extern gepurgt und mit einer neuen Origin-Version neu befüllt wurde. Der Folgezugriff war `L1_MISS_L2_HIT` mit dem neuen Body, nicht `L1_HIT` mit dem alten. HTTP: prime/purge/refresh/final jeweils 200; Origin-Anfragen: 2; alter Body SHA-256 `a82389c100e7139972d596d025b5dabf0be38165d61bd93bf609018eda7b38fa`, neuer Body `bbaa115f96618af1795a163c141952220f6402261f03093eecd0488d3584c82a`. |
+| L2-Dateigeneration bei PURGE/Neubefüllung | OPEN | Der vorhandene Lauf mit r18 zeigte die erwartete Invalidierung. Die L2-Generationsprüfung wurde danach für r23 geändert; deshalb belegt r18 den aktuellen Pfad nicht. Gemäß Testbegrenzung wurde der erfolgreiche ältere Lauf nicht wiederholt. |
 | Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt exakt `proxy_cache_key $l1_cache_key` und die passende Cache-Zone. Gezielt abweichender Proxy-Key: L2 MISS/HIT, `X-L1-Hits: 0`, bytegleiche Antworten, genau ein Origin-Request; L1 wurde sicher umgangen. |
 | L2-Schreibfehler | PASS | r23-Lauf mit nach dem Start schreibgeschütztem L2-Verzeichnis: zwei 200-Antworten blieben `L1_MISS_L2_MISS`, zwei Origin-Requests und zwei native Schreibfehler; kein L1-HIT. |
 | Origin-MISS speichert zuerst L2 und befüllt danach L1 | PASS für getesteten Stock-Pfad | r23 auf unverändertem Alpine NGINX 1.30.6-r0: variabler `proxy_pass`, erfolgreicher L2-MISS und folgender bytegleicher `L1_HIT`; ein ungefüllter `only-if-cached`-Schlüssel lieferte 504 ohne Origin-Request. |
