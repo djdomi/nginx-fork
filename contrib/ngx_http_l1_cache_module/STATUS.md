@@ -204,7 +204,7 @@ At the start of that review, the branch differed from `origin/master` in 14 core
 commit but has no net diff at the current HEAD. The r23 module's Alpine APK
 was built against the packaged unmodified NGINX 1.30.6 sources, installed with
 the original binary, and exercised through real L1/L2 requests. Thus none of
-the current core hunks is required by the shipped dynamic module.
+the historically changed core hunks is required by the shipped dynamic module.
 
 | Core file | Historical hunk responsibility | Classification | PR decision |
 |---|---|---|---|
@@ -243,7 +243,7 @@ in the current dynamic module.
 | Nachinstallation und Laden des Moduls | PASS | `nginx-mod-l1-cache-1.30.6-r23.apk` installiert; `/etc/nginx/modules/50_l1_cache.conf` lädt die `.so`; Paketbuild, echte Proxy-Konfiguration und reguläre Systemkonfiguration bestanden `nginx -t`. Letztere meldet eine nicht fatale `variables_hash`-Warnung. |
 | Echter Shared-Memory-L1-HIT | PASS | Bereits vorhandener Lauf mit mehreren Workern: zweiter Request `L1_HIT`, Body bytegleich, kein zusätzlicher Origin-Request. |
 | Native L2-HIT-Promotion | PASS | Ein L2-HIT mit korrigiertem `Age` wurde nach vollständigem NGINX-Neustart zu `L1_MISS_L2_HIT` promotet; der Folgezugriff war `L1_HIT`. |
-| L2-Dateigeneration bei PURGE/Neubefüllung | OPEN | Der vorhandene Lauf mit r18 zeigte die erwartete Invalidierung. Die L2-Generationsprüfung wurde danach für r23 geändert; deshalb belegt r18 den aktuellen Pfad nicht. Gemäß Testbegrenzung wurde der erfolgreiche ältere Lauf nicht wiederholt. |
+| L2-Dateigeneration bei PURGE/Neubefüllung | PASS | Einmaliger gezielter Lauf mit installiertem r23 auf unverändertem Alpine-NGINX 1.30.6-r0, zwei Workern und 8-MiB-Body: Während der langsame alte L2-HIT ausgeliefert wurde, erfolgte PURGE und ein neuer Origin-Fill. Der Folgerequest war `L1_MISS_L2_HIT` und lieferte den neuen Body, nicht den alten. Alter Body SHA-256 `38f9d816627d9dffa5f1d41d176c890d0e02a555cb31a5982bbdcd27816d84be`; neuer Body SHA-256 `2daeb1f36095b44b318410b3f4e8b5d989dcc7bb023d1426c492dab0a3053e74`; Origin-Requests: 2; alle fünf HTTP-Antworten 200. Temporärer Lauf: `/tmp/l1-l2-generation-r23-oneoff`, Ergebnisse: `/tmp/l1-l2-generation-r23-results`. |
 | Exakte Schlüsselidentität | PASS für konfigurierte Integration | Modul verlangt exakt `proxy_cache_key $l1_cache_key` und die passende Cache-Zone. Gezielt abweichender Proxy-Key: L2 MISS/HIT, `X-L1-Hits: 0`, bytegleiche Antworten, genau ein Origin-Request; L1 wurde sicher umgangen. |
 | L2-Schreibfehler | PASS | r23-Lauf mit nach dem Start schreibgeschütztem L2-Verzeichnis: zwei 200-Antworten blieben `L1_MISS_L2_MISS`, zwei Origin-Requests und zwei native Schreibfehler; kein L1-HIT. |
 | Origin-MISS speichert zuerst L2 und befüllt danach L1 | PASS für getesteten Stock-Pfad | r23 auf unverändertem Alpine NGINX 1.30.6-r0: variabler `proxy_pass`, erfolgreicher L2-MISS und folgender bytegleicher `L1_HIT`; ein ungefüllter `only-if-cached`-Schlüssel lieferte 504 ohne Origin-Request. |
