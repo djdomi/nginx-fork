@@ -458,3 +458,27 @@ Token- und Zugriffskontrolle.
 | Erfolgreicher Unsafe-Methodenpfad | PASS für geprüften POST | Einmaliger Lauf mit zwei Workern auf Stock-NGINX: erster GET `X-L2: MISS`, zweiter GET `X-L1-Cache: HIT`; POST lieferte 204; folgender GET lieferte erneut `X-L2: MISS`. Origin-Log enthielt genau `GET /object`, `POST /object`, `GET /object`. Alle GET-Bodies bytegleich, SHA-256 `a39c3689fae129abde761eb87db3cbcc8a5207eefd0c8eaa814bfb9138b9ae22`. Laufverzeichnis `/tmp/l1-r41-unsafe-purge-20261104a`. |
 | L2-Invalidierung bei erfolgreichem Unsafe-Response | PASS für geprüften Pfad | Der nachfolgende GET erreichte den Origin erneut und war kein L1- oder L2-HIT; der POST hatte somit sowohl den L1-Eintrag als auch die native L2-Datei invalidiert. |
 | Vollständige RFC-/L1-Abnahme | OPEN | Dieser gezielte Nachweis schließt nur die geprüfte erfolgreiche POST-Invalidierung. Weitere Fälle der Gesamtmatrix bleiben offen. |
+
+## RFC-9111 Age: ungültige Feldwerte umgehen L1
+
+Die bisherige Age-Behandlung hatte drei getrennte Grammatikprüfungen: der
+Aufnahmepfad akzeptierte ein Komma nach der Zahl, der Persistenzpfad prüfte
+Ziffern selbst, und der L2-HIT-Pfad nutzte `ngx_atotm()` und setzte ungültige
+Werte auf null. Stock-NGINX 1.30.6 verwendet Age nicht für seine native
+Freshness-Berechnung; seine Proxy-Cache-Frische wird aus `Cache-Control` und
+`Expires` bestimmt. Deshalb ist eine konservative L1-Prüfung erforderlich.
+
+Der Modulcode verwendet jetzt `l1_cache_parse_age()` als einzigen Age-Parser
+für Origin-Aufnahmen, L2-HIT-Altersberechnung und die Persistenzprüfung. Er
+akzeptiert nur eine nichtnegative Dezimalzahl mit optionalem äußeren OWS,
+sättigt Überläufe und lehnt zusätzliche Werte oder Feldzeilen ab. Bei
+fehlerhaftem Age bleibt die reguläre NGINX-Antwort verfügbar, aber L1 wird
+umgangen.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r42 Alpine-Paket | PASS | `NGINX_MOD_PKGREL=42 abuild -r` erfolgreich; Build und `nginx -t` gegen Alpine-NGINX 1.30.6-r0. Installiert auf unverändertem NGINX 1.30.6. Signaturprüfung `apk verify` meldet `OK`; SHA-256 `09176c82a5e9aa6beb9ea2230b07eb648e284141dfa6b7e9d04ecebc2a6ef258`. |
+| Kombinierter ungültiger Age-Wert | PASS | `Age: 5, 999`: erste Antwort L2-MISS; zweite L2-HIT; beide Responses behielten den ursprünglichen Age-Wert und keinen L1-HIT; Bodies bytegleich. |
+| Doppelte Age-Feldzeilen | PASS | Zwei `Age`-Header (`5` und `999`): erste Antwort L2-MISS; zweite L2-HIT; beide Responses behielten beide Felder und keinen L1-HIT; Bodies bytegleich. |
+| Laufzeitumgebung | PASS | Stock-NGINX 1.30.6, zwei konfigurierte Worker, temporärer Test `/tmp/l1-r42-age-strict-20261104a`; kein dauerhafter Testcode hinzugefügt. |
+| Vollständige Age-/RFC-Abnahme | OPEN | Der Nachweis deckt die zwei fehlerhaften Formen ab. Die übrigen RFC-9111-Semantiken bleiben separat offen; erfolgreiche Age-Altersläufe werden nicht wiederholt. |

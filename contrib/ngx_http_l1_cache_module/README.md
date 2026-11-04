@@ -51,14 +51,14 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r41.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r42.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r41.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r42.apk
 sudo nginx -t
 ```
 

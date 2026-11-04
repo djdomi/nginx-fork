@@ -269,6 +269,7 @@ static ngx_int_t l1_cache_add_status(ngx_http_request_t *r,
 static ngx_table_elt_t *l1_cache_add_header(ngx_http_request_t *r,
     const char *name, size_t name_len, u_char *value, size_t value_len);
 static ngx_int_t l1_cache_set_age_header(ngx_http_request_t *r, time_t age);
+static ngx_int_t l1_cache_parse_age(ngx_str_t *value, uint64_t *age);
 static ngx_int_t l1_cache_persist_initial_age(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx);
 static ngx_int_t l1_cache_update_l2_age(ngx_http_request_t *r,
@@ -937,6 +938,49 @@ l1_cache_add_header(ngx_http_request_t *r, const char *name,
 
 
 static ngx_int_t
+l1_cache_parse_age(ngx_str_t *value, uint64_t *age)
+{
+    u_char   *p, *last;
+    uint64_t  parsed, max_age;
+    ngx_uint_t digits;
+
+    p = value->data;
+    last = p + value->len;
+    max_age = (uint64_t) NGX_MAX_INT_T_VALUE;
+    parsed = 0;
+    digits = 0;
+
+    while (p < last && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+
+    while (p < last && *p >= '0' && *p <= '9') {
+        digits++;
+        if (parsed > (max_age - (*p - '0')) / 10) {
+            parsed = max_age;
+        } else {
+            parsed = parsed * 10 + (*p - '0');
+        }
+        p++;
+    }
+
+    while (p < last && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+
+    if (digits == 0 || p != last) {
+        return NGX_DECLINED;
+    }
+
+    if (age != NULL) {
+        *age = parsed;
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 l1_cache_set_age_header(ngx_http_request_t *r, time_t age)
 {
     ngx_list_part_t  *part;
@@ -999,11 +1043,10 @@ l1_cache_persist_initial_age(ngx_http_request_t *r,
     ngx_list_part_t      *part;
     ngx_table_elt_t      *h, *age_header;
     ngx_uint_t            i, count;
-    u_char               *data, *p, *age_end, *raw, *raw_end;
+    u_char               *data, *p, *raw, *raw_end;
     u_char               *line_end, *line_last;
     u_char               *colon, *raw_value, *raw_value_end, *raw_age;
     size_t                value_len, raw_age_count;
-    ngx_flag_t            digit_seen;
 
     if (ctx == NULL || !ctx->admit || ctx->l2_hit || r->upstream == NULL
         || r->cache == NULL)
@@ -1038,20 +1081,7 @@ l1_cache_persist_initial_age(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
-    p = age_header->value.data;
-    age_end = age_header->value.data + age_header->value.len;
-    digit_seen = 0;
-    while (p < age_end && (*p == ' ' || *p == '\t')) {
-        p++;
-    }
-    while (p < age_end && *p >= '0' && *p <= '9') {
-        digit_seen = 1;
-        p++;
-    }
-    while (p < age_end && (*p == ' ' || *p == '\t')) {
-        p++;
-    }
-    if (!digit_seen || p != age_end) {
+    if (l1_cache_parse_age(&age_header->value, NULL) != NGX_OK) {
         return NGX_DECLINED;
     }
 
@@ -1152,8 +1182,9 @@ l1_cache_update_l2_age(ngx_http_request_t *r,
 {
     ngx_list_part_t  *part;
     ngx_table_elt_t  *h;
-    ngx_uint_t        i;
-    time_t            now, resident, apparent_age, age, age_value, date;
+    ngx_uint_t        i, age_count;
+    time_t            now, resident, apparent_age, age, date;
+    uint64_t          age_value, max_age;
 
     if (ctx == NULL || r->cache == NULL || !r->cached
         || (!ctx->l2_hit
@@ -1166,14 +1197,19 @@ l1_cache_update_l2_age(ngx_http_request_t *r,
     now = ngx_time();
     resident = now > r->cache->date ? now - r->cache->date : 0;
     age_value = 0;
+    max_age = (uint64_t) NGX_MAX_INT_T_VALUE;
+    age_count = 0;
     part = &r->headers_out.headers.part;
     h = part->elts;
     for ( ;; ) {
         for (i = 0; i < part->nelts; i++) {
             if (h[i].hash != 0 && L1_HEADER(h[i], "Age")) {
-                age_value = ngx_atotm(h[i].value.data, h[i].value.len);
-                if (age_value < 0) age_value = 0;
-                goto age_found;
+                if (age_count++ != 0
+                    || l1_cache_parse_age(&h[i].value, &age_value) != NGX_OK)
+                {
+                    ctx->age_update_failed = 1;
+                    return NGX_OK;
+                }
             }
         }
         if (part->next == NULL) break;
@@ -1181,18 +1217,17 @@ l1_cache_update_l2_age(ngx_http_request_t *r,
         h = part->elts;
     }
 
-age_found:
     date = r->headers_out.date != NULL
            ? ngx_parse_http_time(r->headers_out.date->value.data,
                                  r->headers_out.date->value.len)
            : NGX_ERROR;
     apparent_age = date != NGX_ERROR && date < now ? now - date : 0;
-    if (age_value > NGX_MAX_INT_T_VALUE - resident) {
-        age_value = NGX_MAX_INT_T_VALUE;
+    if ((uint64_t) resident > max_age - age_value) {
+        age_value = max_age;
     } else {
-        age_value += resident;
+        age_value += (uint64_t) resident;
     }
-    age = ngx_max(apparent_age, age_value);
+    age = ngx_max(apparent_age, (time_t) age_value);
 
     if (l1_cache_set_age_header(r, age) != NGX_OK) {
         ctx->age_update_failed = 1;
@@ -3292,13 +3327,13 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
     ngx_table_elt_t **extra, **saved;
     ngx_array_t extra_headers;
     ngx_uint_t i, date_seen, server_seen, control_seen, expires_seen;
-    ngx_uint_t encoding_seen, age_seen, age_valid, age_digits, j;
+    ngx_uint_t encoding_seen, age_seen, j;
     uint64_t age_value, corrected_age_value, max_age;
     time_t date, now, apparent_age;
     uint64_t response_delay;
     uint64_t delay_seconds;
     size_t metadata_len, extra_len;
-    u_char *p, *age_end;
+    u_char *p;
 
     date_seen = 0;
     server_seen = 0;
@@ -3369,38 +3404,11 @@ l1_cache_capture_metadata(ngx_http_request_t *r,
                 ctx->date = h[i].value;
             } else if (L1_HEADER(h[i], "Age")) {
                 if (age_seen++) {
-                    continue;
+                    return NGX_DECLINED;
                 }
 
-                p = h[i].value.data;
-                age_end = p + h[i].value.len;
-                age_value = 0;
-                age_valid = 1;
-                age_digits = 0;
-
-                while (p < age_end && (*p == ' ' || *p == '\t')) {
-                    p++;
-                }
-
-                for ( ; p < age_end && *p >= '0' && *p <= '9'; p++) {
-                    age_digits++;
-                    if (age_value > (max_age - (*p - '0')) / 10) {
-                        age_value = max_age;
-                    } else {
-                        age_value = age_value * 10 + (*p - '0');
-                    }
-                }
-
-                while (p < age_end && (*p == ' ' || *p == '\t')) {
-                    p++;
-                }
-
-                if (age_digits == 0 || (p < age_end && *p != ',')) {
-                    age_valid = 0;
-                }
-
-                if (!age_valid) {
-                    age_value = 0;
+                if (l1_cache_parse_age(&h[i].value, &age_value) != NGX_OK) {
+                    return NGX_DECLINED;
                 }
 
             } else if (L1_HEADER(h[i], "Server")) {
