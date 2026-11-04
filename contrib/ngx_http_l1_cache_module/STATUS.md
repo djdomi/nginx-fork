@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r55.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r58.
 
 ## Pre-search reasoning record (r22)
 
@@ -629,22 +629,76 @@ Modul und das unveränderte NGINX geprüft.
 
 Das r54-Artefakt liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r54.apk`.
 
-## r55: PURGE-Race-Check bei Subrequest-Fehler fail-closed behandeln
+## r55: fehlgeschlagene erste Fehlerbehandlung (durch r56 ersetzt)
 
-Die beiden Body-Filter-Endpfade ignorierten bisher einen Fehler beim Anlegen
-des nachgelagerten PURGE-Prüf-Subrequests. Ohne diesen Check könnte NGINX den
-laufenden nativen L2-Fill nach einem konkurrierenden PURGE noch veröffentlichen.
-Der gemeinsame Fehlerpfad lehnt nun die L1-Aufnahme ab und setzt
-`r->upstream->cacheable` zurück, bevor der Body-Pipe-Handler den nativen
-Datei-Commit ausführt. Die Clientantwort wird weitergeleitet. Die gemeinsame
-Capture-Aufräumlogik bleibt aktiv, damit ein PURGE den laufenden Request bis
-zu dessen Abschluss weiterhin erkennt.
+Der erste Fehlerpfad lehnte L1 ab und setzte `r->upstream->cacheable` zurück.
+Ein temporärer Laufzeit-Injectionstest zeigte, dass NGINX trotzdem den L2-Body
+committen konnte: Beim zweiten Request kam weiterhin `L1_MISS_L2_HIT`. Die
+Ursache ist, dass der native L2-Commit in diesem Ausgabepfad bereits erfolgt
+sein kann, bevor der letzte Body-Filter-Callback den fehlgeschlagenen
+Prüf-Subrequest erkennt. Der r55-Fail-closed-Nachweis war damit widerlegt.
 
 | Prüfschritt | Ergebnis | Nachweis |
 |---|---|---|
 | r55 Build und Modulinitialisierung | PASS | `abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; dynamisches Modul kompiliert und die integrierte Modul-Konfiguration bestand `nginx -t`. |
 | APK-Verifikation und Installation | PASS | `apk verify` OK; r55 über r54 installiert. Paket-SHA-256 `ec1158b6497b66acb178439520fa15faa5d254f94eab24e6a02599f66979fdcd`. |
 | Unverändertes System-NGINX | PASS | `/etc/nginx/nginx.conf` mit installiertem r55 bestand `nginx -t`; die vorhandene `variables_hash`-Warnung ist nicht fatal. |
-| Erzwungener Subrequest-Allokationsfehler im Laufzeittest | OPEN | Der fail-closed Fehlerpfad wurde gebaut, aber ein künstlich induzierter Laufzeitfehler wurde nicht ausgeführt. |
+| Erzwungener Subrequest-Fehler, erster Ansatz | FAIL | Temporärer Fehler-Injection-Build: trotz Fehler kam der Folgezugriff als `L1_MISS_L2_HIT`; daher nicht als fail-closed gewertet. `/tmp/l1-postcommit-fail.uyr2ct/run2`. |
 
-Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r55.apk`.
+Das r55-Artefakt liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r55.apk`.
+
+## r56: PURGE-Tombstone nach fehlgeschlagenem Post-Commit-Check
+
+Wenn der Post-Commit-Check nicht angelegt werden kann, markiert der Capture
+seinen Zustand. Trifft ein PURGE auf diesen aktiven Capture, wird dessen
+Schlüssel nach Ende des Fills als begrenzter Shared-Memory-Tombstone behalten.
+Anfragen für diesen Schlüssel umgehen L1 und L2. Der nächste Request versucht
+den nativen PURGE erneut und umgeht beide Caches selbst; der Tombstone wird erst
+nach erfolgreichem nativen PURGE freigegeben. So kann ein früher PURGE nicht
+durch einen später committeten Fill rückgängig gemacht werden. Tombstones zählen
+zum konfigurierbaren Trackerlimit.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r56 Build, Modulinitialisierung und APK | PASS | `abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; Modul kompiliert und integrierter `nginx -t` erfolgreich. APK-Signatur `apk verify` OK; SHA-256 `ab11cd961d25ea64ad6eb4f3c2fa0f656a647f2f7d6a32de7281629eb586a878`. |
+| Installiertes APK auf unverändertem NGINX | PASS | r56 über r55 installiert; unverändertes `/etc/nginx/nginx.conf` bestand `nginx -t`. |
+| Post-Commit-Subrequest-Fehler während aktivem PURGE | PASS für gezielten Lauf | Temporärer Stock-NGINX-Testbuild injizierte `NGX_ERROR` ausschließlich am `ngx_http_subrequest()`-Aufruf des Post-Commit-Checks. PURGE während eines langsamen 512-KiB-Fills: HTTP 202. Danach wurde der nächste Request `BYPASS` statt L2-HIT; anschließend folgten L2-MISS und L2-HIT. Originzugriffe: 3; Bodies aller vier GET-Antworten bytegleich, SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Testmodul und temporäre Konfiguration lagen unter `/tmp/l1-postcommit-fail.uyr2ct/run4`; keine Fehler-Injektion im ausgelieferten APK. |
+| Weitere Fälle / vollständige PURGE-Race-Abnahme | OPEN | Dieser Lauf prüft nur den Fehler beim Post-Commit-Subrequest in Verbindung mit einem PURGE während des Fills. Andere Invalidierungs-, Abbruch-, 304-, Konkurrenz- und Speicherfehlerfälle bleiben offen. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r56.apk`.
+
+## r57: Tombstone bei Worker-Abbruch erhalten
+
+Die Tombstone-Umwandlung wurde auch in die Shared-Memory-Bereinigung für
+abgestürzte Worker aufgenommen. Wenn ein Worker mit fehlgeschlagenem
+Post-Commit-Check und bereits eingegangenem PURGE stirbt, werden seine
+unfertigen L1-Allokationen freigegeben, der PURGE-Tracker bleibt aber als
+Tombstone bestehen. Ein laufender PURGE-Retry bleibt bei der Umwandlung
+markiert, damit nicht unnötig ein zweiter Retry gestartet wird.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r57 Build und Installation | PASS | Gegen Alpine `nginx-mod-dev=1.30.6-r0` gebaut, `apk verify` OK, über r56 installiert; unverändertes System-NGINX bestand `nginx -t`. APK-SHA-256 `7bf9eaad88394bd0fdc363b4f0ea1cffc5a990ae0bbff0b0aca98f3041d2acb6`. |
+| Fehler-Injection nach Tombstone-/Retry-Anpassung | PASS für gezielten Ablauf | Temporärer Modulbuild ließ `l1_cache_start_l2_purge_check()` gezielt fehlschlagen. PURGE während langsamem 512-KiB-Fill: 202; nächster Zugriff `BYPASS`; danach `L1_MISS_L2_MISS` und `L1_MISS_L2_HIT`. Drei Origin-Zugriffe; vier Bodies bytegleich, SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Testkonfiguration `/tmp/l1-postcommit-fail.uyr2ct/run5`; Fehler-Injektion nicht im APK. |
+| Worker-Abbruch während fehlgeschlagenem Capture | OPEN | Der Reaper-Tombstonepfad ist gebaut, aber kein Worker-Abbruch wurde in diesem Ablauf injiziert. |
+| Vollständige Invalidierungs- und RFC-Abnahme | OPEN | Andere Rennen und die breite RFC-Matrix bleiben offen. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r57.apk`.
+
+## r58: fehlgeschlagenen nativen PURGE als Retry-Tombstone behalten
+
+Ein Fehlerstatus vom nativen PURGE-Subrequest setzte bisher nur einen Logeintrag;
+der Request-Capture konnte anschließend verschwinden, obwohl die
+`PURGE_PENDING`-Sperre nicht aufgehoben werden durfte. Der Callback markiert
+den Capture jetzt als retryfähig, falls der native PURGE nicht erfolgreich
+war. Ist der Fill noch aktiv, bleibt er bis zu dessen Abschluss erhalten; wird
+er beendet, wird er in den bestehenden Tombstone überführt. Spätere Requests
+umgehen beide Cache-Schichten und lösen einen erneuten nativen PURGE aus.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r58 Build, APK und Installation | PASS | Alpine `nginx-mod-dev=1.30.6-r0`; Build, Modulinitialisierung, `apk verify`, Installation über r57 und System-`nginx -t` erfolgreich. SHA-256 `75736b49d74947e9e8df142030d8348c903b64a4db4a7107153152b5b5d03d9e`. |
+| Fehlerhafte Antwort des nativen PURGE-Handlers | OPEN | Der neue Callbackpfad ist kompiliert, aber ein nativer PURGE-Fehler wurde nicht injiziert. |
+| Gesamtstatus Invalidierung und RFC | OPEN | Die bisherige gezielte Subrequest-Erstellungsfehler-Injektion blieb mit r57 erfolgreich; sie prüft nicht den neuen nativen PURGE-Fehlercallback. Die übrigen offenen Punkte bleiben bestehen. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r58.apk`.
