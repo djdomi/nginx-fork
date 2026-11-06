@@ -45,7 +45,7 @@ installed `nginx` package. In a package build environment, pass the exact
 version returned by `apk info -a nginx`:
 
 ```sh
-NGINX_PKGVER=1.30.6-r0 NGINX_MOD_PKGREL=66 abuild -r
+NGINX_PKGVER=1.30.6-r0 NGINX_MOD_PKGREL=67 abuild -r
 sudo apk add --repository=/path/to/repository nginx-mod-l1-cache
 ```
 
@@ -56,26 +56,22 @@ provides native L2 purge support. The tested target in this repository is
 Alpine x86_64 with `nginx-1.30.6-r0`.
 
 A prebuilt package for that exact target is available at
-`alpine/dist/nginx-mod-l1-cache-1.30.6-r66.apk`; its signing key is
+`alpine/dist/nginx-mod-l1-cache-1.30.6-r67.apk`; its signing key is
 `alpine/dist/codex-6ae8bf51.rsa.pub`. Install the public key as trusted, then
 install the APK (the configured Alpine repositories must provide the matching
 purge module):
 
 ```sh
 sudo install -m 0644 codex-6ae8bf51.rsa.pub /etc/apk/keys/
-sudo apk add ./nginx-mod-l1-cache-1.30.6-r66.apk
+sudo apk add ./nginx-mod-l1-cache-1.30.6-r67.apk
 sudo nginx -t
 ```
 
-When `proxy_pass_trailers on` is enabled, L1 and native L2 are bypassed for
-that location. NGINX 1.30.6 forwards trailers from the origin but does not
-retain them in its file cache; serving a later L2 hit would therefore lose
-the trailer fields. The configured `proxy_cache_bypass` and `proxy_no_cache`
-directives must use `$l1_cache_request_bypass` and
-`$l1_cache_request_no_store` as shown above. `only-if-cached` requests in such
-a location return 504 without contacting the origin.
-This representation-safety bypass also applies when `l1_cache_force on` is
-configured; Force does not permit replaying a response with missing trailers.
+When `proxy_pass_trailers on` is enabled, L1 is bypassed because its object
+format does not retain trailers. Native L2 remains active; RFC 9111 §3.1
+permits caches to discard trailer fields, and this preserves NGINX's existing
+cache behavior. For `only-if-cached`, a supported static proxy may return a
+native L2 hit; on a miss, the module prevents origin access and returns 504.
 
 This artifact is only compatible with the pinned Alpine x86_64 NGINX package
 version above. For other NGINX package versions, build a matching APK instead.

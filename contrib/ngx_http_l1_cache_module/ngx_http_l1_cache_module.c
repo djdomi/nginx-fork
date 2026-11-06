@@ -2272,21 +2272,25 @@ l1_cache_handle_request(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
-    /* What: Bypasses both cache tiers when proxy trailers are enabled.
-     * Why: L1 cannot replay trailers, and native L2 drops them on a cache hit.
-     * From: RFC 9112 §7.1.2; verified with stock NGINX 1.30.6.
+    /* What: Bypasses L1 when proxy trailers are enabled.
+     * Why: L1 does not retain trailers; native L2 may discard them.
+     * From: RFC 9111 §3.1.
      */
     plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
     if (plcf != NULL && plcf->upstream.pass_trailers) {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
-        if (ctx->request_only_if_cached) {
-            return NGX_HTTP_GATEWAY_TIME_OUT;
-        }
-
-        ctx->request_bypass = 1;
-        ctx->request_no_store = 1;
         if (l1_cache_track_request(r, ctx) != NGX_OK) {
             ctx->tracking_failed = 1;
+            ctx->request_bypass = 1;
+            ctx->request_no_store = 1;
+            if (ctx->request_only_if_cached) {
+                return NGX_HTTP_GATEWAY_TIME_OUT;
+            }
+        }
+        if (ctx->request_only_if_cached
+            && !ctx->only_if_cached_peer_guard)
+        {
+            return NGX_HTTP_GATEWAY_TIME_OUT;
         }
         return NGX_DECLINED;
     }
