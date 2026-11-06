@@ -395,7 +395,7 @@ behebt dies mit einem Proxy-Content-Handler-Wrapper und zwei geordneten
 Modulregistrierungen. Die Diagnoseausgaben wurden vor dem APK-Build entfernt;
 die obigen Laufzeitnachweise stammen aus dem installierten r25-Artefakt.
 
-## Offener Konkurrenzfehler: 100 gleichzeitige Slice-Downloads
+## Historischer Konkurrenzfehler: 100 gleichzeitige Slice-Downloads
 
 Ein einmaliger Lauf mit 100 parallelen GETs desselben 262144-Byte-Objekts,
 16-KiB-Slices, zwei Workern und `proxy_cache_lock on` schlug mit installiertem
@@ -531,7 +531,7 @@ Wrapper.
 | `If-Range` mit veraltetem Validator | PASS für diesen Lauf | HTTP 200 und kompletter Body bytegleich zur 262144-Byte-Quelle; L1 meldete `BYPASS`. |
 | Nicht erfüllbare Range `bytes=262144-` | PASS für diesen Lauf | HTTP 416 mit `Content-Range: bytes */262144`. |
 | Zwei nicht überlappende Ranges | PASS als nativer Fallback | Anfrage `bytes=0-10,32760-32780` erhielt HTTP 200; kompletter Body war bytegleich zur Quelle und L1 lieferte keinen Teilbody. RFC 9110 §14.2 erlaubt das Ignorieren einer `Range`-Anfrage; die zunächst erwartete 206-Antwort war keine normative Pflicht. |
-| Aussage zu den zeitgleichen SIGSEGVs | OPEN | Der korrigierte Lauf besteht den gezielten Fall, ist aber kein Stacktrace und beweist nicht rückwirkend, dass der zeitgleiche SIGSEGV aus genau diesem Testlauf oder derselben Ursache stammt. Breitere Konkurrenz- und Langzeitabnahme bleibt offen. |
+| Aussage zu den zeitgleichen SIGSEGVs | HISTORISCH OFFEN, kein aktueller Produktfehler | Die Herkunft des alten Sammel-Logs lässt sich nicht rückwirkend zuordnen. Der korrigierte r44-Lauf mit denselben 100 Clients endete mit beiden Workern regulär; sein getrenntes Fehlerlog enthält keinen SIGSEGV. Die damalige Ursache bleibt unbekannt, ist aber kein offener Befund des geprüften aktuellen Slice-Pfads. |
 
 Das APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r44.apk`. Der Testlauf
 verwendete temporäre Dateien unter `/tmp/l1-slice-fix-XbkDGt`; es wurden keine
@@ -785,3 +785,4 @@ bleibt unverändert.
 | r63-Build und Paket | PASS | Gegen Alpine `nginx-mod-dev=1.30.6-r0` gebaut; `apk verify` OK; installiert über r62. APK-SHA-256 `dd78eb6ba53007bae99b22b1873b241e702dbc2afaf7483f3ad695a9d02dc44c`. |
 | Installation und unverändertes NGINX | PASS | Installiertes `/usr/sbin/nginx` 1.30.6; reguläres `nginx -t` erfolgreich. |
 | PURGE während verzögerter L2-304-Revalidierung | PASS für diesen Lauf | Zwei Worker, 512-KiB-Body: erster Fill `L1_MISS_L2_MISS`; Origin antwortete beim Revalidate mit 304; gleichzeitiger PURGE HTTP 202; revalidierte Antwort `L1_MISS_L2_REVALIDATED`; danach einmal `L1_MISS_L2_MISS`, anschließend `L1_HIT`. Alle GET-Bodies bytegleich, SHA-256 `ed8222322c3bf68b9343ae477d96b564674a2ecce5587e1e793eb274d336af05`. Originfolge: 200, 304, 200. Keine PURGE-Fehlermeldung. Fixture `/tmp/l1-purge-304-r63.B1KGPL`. |
+| 100 parallele identische Slice-L1-GETs | PASS; r44-Nachweis wiederverwendet | Der r44-Lauf prüfte 100 Clients, zwei Worker und 16-KiB-Slices; alle 100 Bodies waren vollständig und bytegleich, der Origin blieb bei 16 Segmentrequests, beide Worker beendeten regulär. Seit r44 unverändert: `l1_cache_lookup()`, `l1_cache_install_slice_resume()`, `l1_cache_slice_write_handler()` und der Slice-Content-Handler. Die späteren Body-Filteränderungen betreffen nicht aufnehmende Captures; ein L1-Hit wird weiterhin direkt an den nächsten Filter weitergereicht. Deshalb wurde der bestandene Lauf nicht wiederholt. |
