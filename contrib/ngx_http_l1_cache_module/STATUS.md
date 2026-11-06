@@ -768,7 +768,7 @@ Validatoranfrage.
 | Native L2-304-Revalidierung und anschließende L1-Aufnahme | PASS für gezielten Lauf | Stock-NGINX 1.30.6, zwei Worker, persistierter abgelaufener 512-KiB-L2-Eintrag: Revalidierungsrequests erhielten HTTP 200 mit `L1_MISS_L2_REVALIDATED`; der Origin antwortete jeweils 304. Der Folgezugriff war `L1_HIT`. Alle drei Bodies waren 524288 Byte und bytegleich, SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Temporärer Lauf `/tmp/l1-revalidate-304-r61`. |
 | Vollständige PURGE-/RFC-Abnahme | OPEN | r63 weist den PURGE während einer verzögerten 304-Revalidierung gezielt nach. Andere PURGE-Rennen sowie RFC-, Konkurrenz- und Ressourcenfälle bleiben offen. |
 
-Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r62.apk`.
+Das Paket dieses Nachweises liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r62.apk`.
 
 ## r63: PURGE-Ergebnis bei L2-304-Revalidierung korrekt auswerten
 
@@ -786,3 +786,35 @@ bleibt unverändert.
 | Installation und unverändertes NGINX | PASS | Installiertes `/usr/sbin/nginx` 1.30.6; reguläres `nginx -t` erfolgreich. |
 | PURGE während verzögerter L2-304-Revalidierung | PASS für diesen Lauf | Zwei Worker, 512-KiB-Body: erster Fill `L1_MISS_L2_MISS`; Origin antwortete beim Revalidate mit 304; gleichzeitiger PURGE HTTP 202; revalidierte Antwort `L1_MISS_L2_REVALIDATED`; danach einmal `L1_MISS_L2_MISS`, anschließend `L1_HIT`. Alle GET-Bodies bytegleich, SHA-256 `ed8222322c3bf68b9343ae477d96b564674a2ecce5587e1e793eb274d336af05`. Originfolge: 200, 304, 200. Keine PURGE-Fehlermeldung. Fixture `/tmp/l1-purge-304-r63.B1KGPL`. |
 | 100 parallele identische Slice-L1-GETs | PASS; r44-Nachweis wiederverwendet | Der r44-Lauf prüfte 100 Clients, zwei Worker und 16-KiB-Slices; alle 100 Bodies waren vollständig und bytegleich, der Origin blieb bei 16 Segmentrequests, beide Worker beendeten regulär. Seit r44 unverändert: `l1_cache_lookup()`, `l1_cache_install_slice_resume()`, `l1_cache_slice_write_handler()` und der Slice-Content-Handler. Die späteren Body-Filteränderungen betreffen nicht aufnehmende Captures; ein L1-Hit wird weiterhin direkt an den nächsten Filter weitergereicht. Deshalb wurde der bestandene Lauf nicht wiederholt. |
+
+## r65: Trailer-Responses sicher an beiden Cacheebenen vorbeiführen
+
+Der L1-Objektdatensatz speichert Response-Header und Body, jedoch keine Trailer.
+Ein L1-Hit könnte deshalb Trailer auslassen. Ein einmaliger Lauf mit
+unverändertem Alpine-NGINX 1.30.6 zeigte außerdem, dass der native NGINX-L2-
+Dateicache Trailer auf einem L2-HIT ebenfalls nicht ausliefert. Für Locations
+mit `proxy_pass_trailers on` setzt das Modul daher vor dem Proxy-Aufruf sowohl
+`$l1_cache_request_bypass` als auch `$l1_cache_request_no_store`; der normale
+Origin-Pfad reicht die Trailer weiter, speichert die Antwort aber in keiner
+Cacheebene. `only-if-cached` liefert dort 504, ohne den Origin aufzurufen.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r65-Build und APK-Signatur | PASS | `NGINX_MOD_PKGREL=65 abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; `make modules` und integrierter `nginx -t` erfolgreich; `apk verify` OK. SHA-256 `d2898841e1fa8d4b6d536b047811529aeee7952d90370ebd0599be1cc42cb07b`. |
+| Native L2-Verlust des Trailers | PASS für den Befund | Mit r64 und `proxy_pass_trailers on`: erster Origin-MISS lieferte `X-Checksum: sha256-test`; zweiter Request war `X-L2: HIT`, aber der Trailer fehlte. Beide Responses waren HTTP 200. Dieser Lauf begründet den Bypass beider Cacheebenen. |
+| Trailer-Passthrough nach Korrektur | PASS für diesen Lauf | Stock-NGINX 1.30.6 mit installiertem r65; zwei identische GETs lieferten jeweils HTTP 200, `X-L1-Cache-Status: BYPASS`, `X-L2: BYPASS`, Body `hello!` und `X-Checksum: sha256-test`. Origin erhielt exakt zwei Requests; Bodies waren bytegleich. Temporärer Lauf `/tmp/l1-trailers-r65.AxfQGc`. |
+| `only-if-cached` bei Trailer-Forwarding | PASS für diesen Lauf | r66 gab bei `Cache-Control: only-if-cached` HTTP 504 zurück; der Origin-Zähler blieb bei zwei Requests der beiden normalen Trailerabrufe. |
+| Gesamt-RFC- und Cache-Abnahme | OPEN | Der Trailer-Fall ist gezielt korrigiert. Weitere RFC-, PURGE-, Konkurrenz- und Ressourcenfälle aus der bestehenden Abnahmeliste bleiben offen. |
+
+## r66: `only-if-cached` bei Trailer-Forwarding ohne Upstream-Zugriff
+
+Die frühe 504-Antwort wurde vor dem Anlegen des PURGE-Tracking-Eintrags
+platziert. Damit wird bei `only-if-cached` weder der Origin aufgerufen noch
+unnötig ein Shared-Memory-Request-Tracker reserviert.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r66-Build, Installationsupgrade und Konfiguration | PASS | `NGINX_MOD_PKGREL=66 abuild -r`; `apk verify` OK; über r65 installiert; Stock-NGINX 1.30.6 `nginx -t` erfolgreich. SHA-256 `1fb3efa1e229609822a26baf67491b53a9e8fa6b2c06f7d090a6652dabfb0a40`. |
+| Trailer und `only-if-cached` | PASS für diesen Lauf | Zwei normale GETs lieferten jeweils HTTP 200, Trailer und `X-L1-Cache-Status: BYPASS`/`X-L2: BYPASS`. Der dritte Request mit `Cache-Control: only-if-cached` ergab HTTP 504. Origin erhielt exakt zwei Requests, also keinen für den 504-Fall. Beide normalen Bodies waren bytegleich. Fixture `/tmp/l1-trailers-r66.JyhRk9`. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r66.apk`.

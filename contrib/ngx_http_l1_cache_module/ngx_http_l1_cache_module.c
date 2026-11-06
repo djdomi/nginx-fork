@@ -2120,6 +2120,7 @@ l1_cache_handle_request(ngx_http_request_t *r,
     ngx_http_l1_cache_loc_conf_t *lcf;
     ngx_http_l1_cache_ctx_t *ctx;
     ngx_http_core_loc_conf_t *clcf;
+    ngx_http_proxy_loc_conf_t *plcf;
     ngx_http_variable_value_t *slice_value;
     ngx_int_t slice, rc;
     ngx_str_t key;
@@ -2270,6 +2271,26 @@ l1_cache_handle_request(ngx_http_request_t *r,
         }
         return NGX_DECLINED;
     }
+
+    /* What: Bypasses both cache tiers when proxy trailers are enabled.
+     * Why: L1 cannot replay trailers, and native L2 drops them on a cache hit.
+     * From: RFC 9112 §7.1.2; verified with stock NGINX 1.30.6.
+     */
+    plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
+    if (plcf != NULL && plcf->upstream.pass_trailers) {
+        (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
+        if (ctx->request_only_if_cached) {
+            return NGX_HTTP_GATEWAY_TIME_OUT;
+        }
+
+        ctx->request_bypass = 1;
+        ctx->request_no_store = 1;
+        if (l1_cache_track_request(r, ctx) != NGX_OK) {
+            ctx->tracking_failed = 1;
+        }
+        return NGX_DECLINED;
+    }
+
     ctx->lookup = 1;
 
     /* What: Avoids stale L1/L2 reuse while a purged fill is still publishing.
