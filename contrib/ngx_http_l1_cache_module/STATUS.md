@@ -919,6 +919,7 @@ Direktivkombinationen bleiben im konservativen Bypass.
 | Bereits gespeichertes L2-Objekt mit `no-store, only-if-cached` | PASS | Nach Frontend-Neustart (L1 leer) HTTP 200 `L1_MISS_L2_HIT`; der anschließende normale `only-if-cached`-Abruf blieb `L1_MISS_L2_HIT`, also wurde der no-store-Request nicht in L1 aufgenommen. Beide Bodies waren bytegleich zum Fill. |
 | Cache-Miss mit `no-store, only-if-cached` | PASS | HTTP 504; Originlog unverändert, somit kein Origin-Request und keine Speicherung. |
 | Gepinnter L1-HIT während Eviction und Speicherlast | PASS | Stock-NGINX 1.30.6, Shared-Zone 8 MiB, 512-KiB-Objekte. Während eines gebremsten L1-HITs meldeten die Metriken `pins=1`; nach Aufnahme von 14 weiteren Objekten blieb `pins=1`, `evictions=3`, `building=0`, `used=6297312` Bytes und `objects=12`. Nach Abschluss wurde `pins=0`; der Folgezugriff blieb `L1_HIT`. Fill, laufender HIT und Folge-HIT waren bytegleich (SHA-256 `86df69acb1ae182a182e3f0d13d65c074ebc8cb648fde1d1180c32a3a1a60f01`). Temporärer Lauf `/tmp/l1-pin-evict-r74c`. |
+| 50 parallele L1-HITs über vier Worker | PASS | Stock-Alpine-NGINX 1.30.6 (musl), `worker_processes 4`, ein vorgewärmtes 512-KiB-Objekt; 50 parallele Clients erhielten HTTP 200 und `L1_HIT`. Alle 50 Bodies hatten denselben SHA-256 wie der Fill (`61f7a39463e99761bebdf9b549864f504875ea79805d10b357a6ea14c9845f69`); kein HTTP-Fehler. Temporärer Lauf `/tmp/l1-4w-50c-r74`. |
 
 Temporärer Lauf: `/tmp/l1-oic-nostore-r74`. Die Prüfung deckt die
 RFC-9111-Request-no-store-Semantik und die getrennte L1-/L2-Behandlung ab;
