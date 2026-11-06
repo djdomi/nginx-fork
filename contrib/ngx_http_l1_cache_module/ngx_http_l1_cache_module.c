@@ -2522,6 +2522,12 @@ l1_cache_l2_purge_post_subrequest(ngx_http_request_t *r, void *data,
     ngx_flag_t check_failed;
 
     status = r->headers_out.status;
+    /* What: Uses the subrequest result when no response header was finalized.
+     * Why: NGINX may return an HTTP status directly from the purge handler.
+     */
+    if (status == 0 && rc >= NGX_HTTP_OK) {
+        status = (ngx_uint_t) rc;
+    }
     if ((status < NGX_HTTP_OK || status >= NGX_HTTP_BAD_REQUEST)
         && status != NGX_HTTP_NOT_FOUND
         && status != NGX_HTTP_PRECONDITION_FAILED)

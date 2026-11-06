@@ -769,3 +769,19 @@ Validatoranfrage.
 | Vollständige PURGE-/RFC-Abnahme | OPEN | Der isolierte 304-Revalidierungs- und Promotionspfad ist nachgewiesen. PURGE-Rennen während 304-Revalidierung und weitere offene RFC-/Konkurrenz-/Ressourcenfälle bleiben offen. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r62.apk`.
+
+## r63: PURGE-Ergebnis bei L2-304-Revalidierung korrekt auswerten
+
+Der NGINX-Post-Subrequest-Callback erhält den direkt zurückgegebenen HTTP-
+Status als `rc`; `headers_out.status` kann dabei noch 0 sein. Der verzögerte
+L2-PURGE wertete bislang nur `headers_out.status` aus und behielt dadurch
+fälschlich den PURGE-Tombstone, obwohl der native Purge-Handler 412 (kein
+passender Cacheeintrag) zurückgab. Der Callback verwendet jetzt `rc`, wenn
+kein Response-Status gesetzt wurde. Die vorhandene Behandlung von 412/404
+bleibt unverändert.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r63-Build und Paket | PASS | Gegen Alpine `nginx-mod-dev=1.30.6-r0` gebaut; `apk verify` OK; installiert über r62. APK-SHA-256 `dd78eb6ba53007bae99b22b1873b241e702dbc2afaf7483f3ad695a9d02dc44c`. |
+| Installation und unverändertes NGINX | PASS | Installiertes `/usr/sbin/nginx` 1.30.6; reguläres `nginx -t` erfolgreich. |
+| PURGE während verzögerter L2-304-Revalidierung | PASS für diesen Lauf | Zwei Worker, 512-KiB-Body: erster Fill `L1_MISS_L2_MISS`; Origin antwortete beim Revalidate mit 304; gleichzeitiger PURGE HTTP 202; revalidierte Antwort `L1_MISS_L2_REVALIDATED`; danach einmal `L1_MISS_L2_MISS`, anschließend `L1_HIT`. Alle GET-Bodies bytegleich, SHA-256 `ed8222322c3bf68b9343ae477d96b564674a2ecce5587e1e793eb274d336af05`. Originfolge: 200, 304, 200. Keine PURGE-Fehlermeldung. Fixture `/tmp/l1-purge-304-r63.B1KGPL`. |
