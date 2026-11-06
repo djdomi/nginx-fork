@@ -766,7 +766,7 @@ Validatoranfrage.
 |---|---|---|
 | r62 APK-Build, Verifikation, Installation und Systemkonfiguration | PASS | Alpine musl, `nginx-1.30.6-r0`; APK `apk verify` OK, Installation über r61, unverändertes `/etc/nginx/nginx.conf` bestand `nginx -t`. SHA-256 `3376fa2463cfd2f2fe595835dcbdd908e8b8f7d15226ec2bae75efea196226c0`. |
 | Native L2-304-Revalidierung und anschließende L1-Aufnahme | PASS für gezielten Lauf | Stock-NGINX 1.30.6, zwei Worker, persistierter abgelaufener 512-KiB-L2-Eintrag: Revalidierungsrequests erhielten HTTP 200 mit `L1_MISS_L2_REVALIDATED`; der Origin antwortete jeweils 304. Der Folgezugriff war `L1_HIT`. Alle drei Bodies waren 524288 Byte und bytegleich, SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Temporärer Lauf `/tmp/l1-revalidate-304-r61`. |
-| Vollständige PURGE-/RFC-Abnahme | OPEN | Der isolierte 304-Revalidierungs- und Promotionspfad ist nachgewiesen. PURGE-Rennen während 304-Revalidierung und weitere offene RFC-/Konkurrenz-/Ressourcenfälle bleiben offen. |
+| Vollständige PURGE-/RFC-Abnahme | OPEN | r63 weist den PURGE während einer verzögerten 304-Revalidierung gezielt nach. Andere PURGE-Rennen sowie RFC-, Konkurrenz- und Ressourcenfälle bleiben offen. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r62.apk`.
 
