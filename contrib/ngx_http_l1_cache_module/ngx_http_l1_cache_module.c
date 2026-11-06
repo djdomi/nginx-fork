@@ -179,6 +179,7 @@ typedef struct {
 typedef struct {
     ngx_http_core_loc_conf_t *clcf;
     ngx_http_l1_cache_loc_conf_t *lcf;
+    ngx_http_proxy_loc_conf_t *plcf;
 } ngx_http_l1_cache_location_t;
 
 typedef struct {
@@ -274,6 +275,8 @@ static ngx_flag_t l1_cache_proxy_identity_matches(ngx_http_request_t *r,
     ngx_http_l1_cache_loc_conf_t *lcf);
 static ngx_flag_t l1_cache_proxy_config_matches(ngx_http_request_t *r,
     ngx_http_l1_cache_loc_conf_t *lcf, ngx_flag_t *cache_bypass);
+static ngx_flag_t l1_cache_has_cache_predicate(ngx_array_t *predicates,
+    const char *name, size_t len);
 static ngx_int_t l1_cache_zone_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t l1_cache_request_policy_variable(ngx_http_request_t *r,
@@ -829,6 +832,33 @@ l1_cache_proxy_config_matches(ngx_http_request_t *r,
     }
 
     return 1;
+}
+
+
+/* What: Finds an exact required native cache predicate.
+ * Why: L1 policy must also govern NGINX's L2 reads and writes.
+ */
+static ngx_flag_t
+l1_cache_has_cache_predicate(ngx_array_t *predicates, const char *name,
+    size_t len)
+{
+    ngx_uint_t                 i;
+    ngx_http_complex_value_t  *values;
+
+    if (predicates == NULL) {
+        return 0;
+    }
+
+    values = predicates->elts;
+    for (i = 0; i < predicates->nelts; i++) {
+        if (values[i].value.len == len
+            && ngx_memcmp(values[i].value.data, name, len) == 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 
@@ -1394,8 +1424,6 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_proxy_loc_conf_t *plcf;
     ngx_http_core_loc_conf_t *clcf;
     ngx_http_l1_cache_location_t *location;
-    ngx_http_complex_value_t *predicate;
-    ngx_uint_t i;
 
     mcf = ngx_http_conf_get_module_main_conf(cf,
                                              ngx_http_l1_cache_module);
@@ -1429,6 +1457,7 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         }
         location->clcf = clcf;
         location->lcf = conf;
+        location->plcf = plcf;
     }
 
     if (conf->enabled) {
@@ -1443,14 +1472,6 @@ l1_cache_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         }
         if (!conf->purge_l2) {
             return "l1_cache_l2_purge cannot be disabled for an L1 cache";
-        }
-        if (plcf != NULL && plcf->upstream.cache_bypass != NULL) {
-            predicate = plcf->upstream.cache_bypass->elts;
-            for (i = 0; i < plcf->upstream.cache_bypass->nelts; i++) {
-                if (l1_cache_key_source_safe(&predicate[i].value) != NGX_OK) {
-                    return "l1_cache requires proxy_cache_bypass variables to be available in PRECONTENT";
-                }
-            }
         }
         if (!conf->force) {
             if (plcf != NULL
@@ -1652,7 +1673,8 @@ l1_cache_init(ngx_conf_t *cf)
     ngx_http_handler_pt *handler;
     ngx_http_l1_cache_main_conf_t *conf;
     ngx_http_l1_cache_location_t *location;
-    ngx_uint_t i;
+    ngx_http_complex_value_t *predicate;
+    ngx_uint_t i, j;
     conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_l1_cache_module);
     ngx_conf_init_size_value(conf->max_object, L1_MAX_OBJECT);
     ngx_conf_init_size_value(conf->block_size, L1_BLOCK_SIZE);
@@ -1666,6 +1688,37 @@ l1_cache_init(ngx_conf_t *cf)
     if (conf->zone == NULL) return NGX_OK;
     location = conf->l1_locations.elts;
     for (i = 0; i < conf->l1_locations.nelts; i++) {
+        if (location[i].plcf == NULL
+            || !l1_cache_has_cache_predicate(
+                    location[i].plcf->upstream.cache_bypass,
+                    "$l1_cache_request_bypass",
+                    sizeof("$l1_cache_request_bypass") - 1))
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "l1_cache requires proxy_cache_bypass $l1_cache_request_bypass");
+            return NGX_ERROR;
+        }
+        if (!l1_cache_has_cache_predicate(
+                location[i].plcf->upstream.no_cache,
+                "$l1_cache_request_no_store",
+                sizeof("$l1_cache_request_no_store") - 1))
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "l1_cache requires proxy_no_cache $l1_cache_request_no_store");
+            return NGX_ERROR;
+        }
+        if (location[i].plcf->upstream.cache_bypass != NULL) {
+            predicate = location[i].plcf->upstream.cache_bypass->elts;
+            for (j = 0; j < location[i].plcf->upstream.cache_bypass->nelts;
+                 j++)
+            {
+                if (l1_cache_key_source_safe(&predicate[j].value) != NGX_OK) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                        "l1_cache requires proxy_cache_bypass variables to be available in PRECONTENT");
+                    return NGX_ERROR;
+                }
+            }
+        }
         if (location[i].clcf->handler != ngx_http_cache_purge_access_handler
             && !(location[i].clcf->handler == l1_cache_proxy_content_handler
                  && location[i].lcf->proxy_content_handler

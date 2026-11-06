@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r69.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r73.
 
 ## Aktuelle Abschlussliste
 
@@ -851,6 +851,29 @@ ohne abgesicherte Invalidierung stattfindet.
 Der Unsafe-Methodenpfad wurde damit gezielt ergänzt und geprüft. Die übrigen
 PURGE-Rennen und die vollständige RFC- sowie Konkurrenz-/Ressourcenmatrix
 bleiben offen; der Gesamtstatus ist weiterhin nicht abgeschlossen.
+
+## r73: L2-Request-Policy in der Location-Konfiguration erzwingen
+
+Die Modulvariablen für Request-Bypass und `no-store` wurden bereits gesetzt,
+aber eine Location konnte sie in `proxy_cache_bypass` und `proxy_no_cache`
+weglassen. NGINX ignoriert diese Request-Cache-Direktiven im nativen Proxy
+Cache nicht automatisch. Die Modulinitialisierung prüft jetzt nach dem
+vollständigen NGINX-Konfigurations-Merge, dass beide exakten Prädikate in den
+aktiven Proxy-Cache-Locations vorhanden sind. Die bestehende Prüfung, ob
+Bypass-Variablen in PRECONTENT verfügbar sind, läuft ebenfalls nach dem Merge.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r73 Build, Modulprüfung und APK | PASS | `NGINX_MOD_PKGREL=73 abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; Modulbuild und eingebettetes `nginx -t` erfolgreich. APK-SHA-256 `078df4ec4b0975dcc37cc6f2a6f6bd328246329ab81996918270cbf631666cfe`. |
+| APK-Installation auf Stock-NGINX | PASS | r73 wurde über r69 installiert; unverändertes System-NGINX 1.30.6 bestand `nginx -t`. |
+| Pflichtdirektiven bei fehlender Konfiguration | PASS | Stock-NGINX lehnte die Location ohne `proxy_cache_bypass $l1_cache_request_bypass` mit genau dieser Konfigurationsfehlermeldung ab. |
+| Gültige Konfiguration | PASS | Dieselbe Location mit beiden erforderlichen Prädikaten bestand `nginx -t`. |
+| `Cache-Control: no-cache` | PASS für diesen Lauf | Fill `L1_MISS_L2_MISS`; normaler Abruf `L1_HIT`; `no-cache`-Abruf `BYPASS` in L1 und L2; Folgeabruf `L1_MISS_L2_HIT`. Alle vier Bodies bytegleich (SHA-256 `a39c3689fae129abde761eb87db3cbcc8a5207eefd0c8eaa814bfb9138b9ae22`). Temporärer Lauf `/tmp/l1-rfc-valid-r73`. |
+| `Cache-Control: no-store` | PASS für diesen Lauf | Request `no-store` war L1/L2 `BYPASS`; danach normaler Request `L1_MISS_L2_MISS`, anschließend `L1_HIT`. Alle Bodies bytegleich mit demselben SHA-256. Temporärer Lauf `/tmp/l1-rfc-nostore-r73`. |
+
+Die Konfigurationsabsicherung und diese zwei Request-Direktiven sind gezielt
+abgeschlossen. Die übrige RFC-/HTTP-Matrix sowie verbleibende PURGE- und
+Konkurrenz-/Ressourcenfälle bleiben offen.
 
 | Ressourcenfall | Ergebnis | Nachweis |
 |---|---|---|

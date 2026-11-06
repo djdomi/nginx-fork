@@ -223,6 +223,12 @@ to `$proxy_host`, `$proxy_port`, or `$upstream_*`. Native `proxy_no_cache`
 predicates remain authoritative for whether an upstream response may be
 admitted to L1, matching their native role as write controls.
 
+Both `proxy_cache_bypass $l1_cache_request_bypass;` and
+`proxy_no_cache $l1_cache_request_no_store;` are required in every enabled
+location. Configuration validation rejects an L1 location that omits either
+exact native predicate, because otherwise NGINX's L2 could ignore request
+directives that L1 correctly bypasses.
+
 Successful responses to unsafe methods (2xx or 3xx) invalidate the matching
 L1 entry and schedule an internal call to the configured native L2 purge
 handler. A per-key shared-memory marker blocks concurrent reads until that
