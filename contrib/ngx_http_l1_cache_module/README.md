@@ -225,7 +225,12 @@ admitted to L1, matching their native role as write controls.
 
 Successful responses to unsafe methods (2xx or 3xx) invalidate the matching
 L1 entry and schedule an internal call to the configured native L2 purge
-handler; failed responses leave both cache entries usable. L2 invalidation is
+handler. A per-key shared-memory marker blocks concurrent reads until that
+purge completes; if the native purge fails, the marker remains for retry.
+When the bounded tracker cannot reserve that marker, the unsafe request gets
+503 before it reaches the origin, avoiding a successful write with an
+unprotected stale L2 entry. Failed origin responses remove the marker and
+leave both cache entries usable. L2 invalidation is
 mandatory for an enabled L1 location: `l1_cache_l2_purge` defaults to `on`, and
 `off` is rejected during configuration. The same-location
 `proxy_cache_purge PURGE ...` directive is required. The internal purge

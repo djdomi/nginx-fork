@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r67.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r69.
 
 ## Aktuelle Abschlussliste
 
@@ -829,6 +829,28 @@ liefern; bei einem L2-MISS verhindert der vorhandene Peer-Guard den Originzugrif
 | Laufzeitnachweis | PASS | Alle drei Fälle in einem Lauf gegen Stock-NGINX 1.30.6, Fixture `/tmp/l1-trailers-r67.PXGZBB`. RFC 9111 §3.1 erlaubt das Verwerfen von Trailer-Feldern; deren Speicherung oder Replay durch L1 ist nicht behauptet. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r67.apk`.
+
+## r69: Unsafe-Methoden während des nativen L2-PURGE sperren
+
+Ein erfolgreicher PUT/POST/DELETE invalidierte L1, bevor der asynchrone
+native L2-PURGE abgeschlossen war. Ein paralleler Request konnte in diesem
+Zeitfenster noch den alten L2-Eintrag verwenden. Der Request-Handler legt nun
+atomar mit dem Tracker einen per Schlüssel sichtbaren PURGE-Marker an. Der
+Marker bleibt bis zum PURGE-Erfolg bestehen; bei Fehler wird der vorhandene
+Retry-Tombstone verwendet. Ist kein Tracker verfügbar, wird die schreibende
+Anfrage vor dem Origin mit 503 beendet, damit kein erfolgreicher Schreibzugriff
+ohne abgesicherte Invalidierung stattfindet.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r69 dynamischer Build und Paket | PASS | `NGINX_MOD_PKGREL=69 abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; Modullink und integrierter `nginx -t` erfolgreich. APK-SHA-256 `b90a2654f9f372e2e20cc19e0f92dfcdbe014c08964388a3120bad7c9bf9aa2e`. |
+| Installation auf unverändertem NGINX | PASS | r69 wurde über r68 installiert; System-NGINX 1.30.6 bestand `nginx -t`. |
+| Unsafe-Methodenpfad nach Installation | PASS für diesen Lauf | Stock-NGINX 1.30.6, ein Worker: Fill `L1_MISS_L2_MISS`, nächster Request `L1_HIT`, POST `204 BYPASS`, Folgeabruf `L1_MISS_L2_MISS`, nächster Abruf `L1_HIT`. Die vier GET-Bodies waren bytegleich, SHA-256 `a39c3689fae129abde761eb87db3cbcc8a5207eefd0c8eaa814bfb9138b9ae22`; Originfolge `GET, POST, GET`. Temporärer Lauf `/tmp/l1-unsafe-race-r69`. |
+| Fehler bei ausgeschöpftem Trackerlimit | PASS für den beobachteten Fall | Mit einem 8-MiB laufenden, nicht aufnehmbaren GET und `l1_cache_max_tracked_requests 1` wurde ein paralleles POST mit 503 abgewiesen; der Origin protokollierte dafür keinen POST. Der Versuch lief mit r68 und war ein gezielter Ressourcenpfad. |
+
+Der Unsafe-Methodenpfad wurde damit gezielt ergänzt und geprüft. Die übrigen
+PURGE-Rennen und die vollständige RFC- sowie Konkurrenz-/Ressourcenmatrix
+bleiben offen; der Gesamtstatus ist weiterhin nicht abgeschlossen.
 
 | Ressourcenfall | Ergebnis | Nachweis |
 |---|---|---|

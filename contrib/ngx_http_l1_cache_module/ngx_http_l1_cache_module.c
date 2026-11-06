@@ -73,6 +73,7 @@ typedef char ngx_http_l1_cache_capture_pointer_fits[
 #define L1_CAPTURE_CHECK_FAILED 0x20
 #define L1_CAPTURE_PURGE_RETRYING 0x40
 #define L1_CAPTURE_FILL_DONE 0x80
+#define L1_CAPTURE_INVALIDATION 0x100
 
 struct ngx_http_l1_cache_entry_s {
     ngx_rbtree_node_t node;
@@ -349,7 +350,7 @@ static ngx_flag_t l1_cache_has_pending_l2_purge(ngx_str_t *key,
 static void l1_cache_release_purge_retry(
     ngx_http_l1_cache_capture_t *capture);
 static ngx_int_t l1_cache_track_request(ngx_http_request_t *r,
-    ngx_http_l1_cache_ctx_t *ctx);
+    ngx_http_l1_cache_ctx_t *ctx, ngx_flag_t allow_pending);
 static ngx_int_t l1_cache_schedule_post_commit_check(ngx_http_request_t *r,
     ngx_http_l1_cache_ctx_t *ctx);
 static void l1_cache_post_commit_check_failed(ngx_http_l1_cache_ctx_t *ctx);
@@ -2188,6 +2189,14 @@ l1_cache_handle_request(ngx_http_request_t *r,
     {
         ctx->invalidate_after_response = 1;
         ctx->purge_l2_after_response = lcf->purge_l2;
+        if (ctx->purge_l2_after_response) {
+            if (l1_cache_track_request(r, ctx, 1) != NGX_OK) {
+                /* What: Rejects an unsafe request without purge tracking.
+                 * Why: A successful untracked write could expose stale L2.
+                 */
+                return NGX_HTTP_SERVICE_UNAVAILABLE;
+            }
+        }
     }
 
     cache_bypass = 0;
@@ -2279,7 +2288,7 @@ l1_cache_handle_request(ngx_http_request_t *r,
     plcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_module);
     if (plcf != NULL && plcf->upstream.pass_trailers) {
         (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->bypasses, 1);
-        if (l1_cache_track_request(r, ctx) != NGX_OK) {
+        if (l1_cache_track_request(r, ctx, 0) != NGX_OK) {
             ctx->tracking_failed = 1;
             ctx->request_bypass = 1;
             ctx->request_no_store = 1;
@@ -2323,7 +2332,7 @@ l1_cache_handle_request(ngx_http_request_t *r,
     {
         return NGX_HTTP_GATEWAY_TIME_OUT;
     }
-    if (rc == NGX_DECLINED && l1_cache_track_request(r, ctx) != NGX_OK)
+    if (rc == NGX_DECLINED && l1_cache_track_request(r, ctx, 0) != NGX_OK)
     {
         /* What: Bypasses both cache tiers when invalidation tracking fails.
          * Why: An untracked fill could republish an object after PURGE.
@@ -2572,6 +2581,11 @@ l1_cache_l2_purge_post_subrequest(ngx_http_request_t *r, void *data,
     l1_cache_lock(&l1_cache_conf->shpool->mutex);
     check_failed = (capture->flags & L1_CAPTURE_CHECK_FAILED) != 0;
     if (check_failed && (capture->flags & L1_CAPTURE_FILL_DONE)) {
+        ngx_queue_remove(&capture->queue);
+        (void) ngx_atomic_fetch_add(
+            &l1_cache_conf->sh->tracked_requests, -1);
+        ngx_slab_free_locked(l1_cache_conf->shpool, capture);
+    } else if (capture->flags & L1_CAPTURE_INVALIDATION) {
         ngx_queue_remove(&capture->queue);
         (void) ngx_atomic_fetch_add(
             &l1_cache_conf->sh->tracked_requests, -1);
@@ -4133,6 +4147,7 @@ l1_cache_header_filter(ngx_http_request_t *r)
         "<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
     ngx_http_l1_cache_ctx_t *ctx;
     ngx_http_l1_cache_loc_conf_t *lcf;
+    ngx_http_l1_cache_capture_t *purge_marker;
     ngx_int_t rc;
     ngx_http_variable_value_t *slice_value;
     ngx_int_t slice;
@@ -4212,13 +4227,42 @@ l1_cache_header_filter(ngx_http_request_t *r)
         && r->headers_out.status >= NGX_HTTP_OK
         && r->headers_out.status < NGX_HTTP_BAD_REQUEST)
     {
-        l1_cache_invalidate(&ctx->key, NULL,
+        purge_marker = ctx->tracked ? ctx->capture : NULL;
+        l1_cache_invalidate(&ctx->key, purge_marker,
                             ctx->purge_l2_after_response);
-        if (ctx->purge_l2_after_response && r == r->main
-            && l1_cache_start_l2_purge(r, &ctx->proxy_key, NULL) != NGX_OK)
-        {
-            ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-                          "l1 cache could not schedule native L2 purge");
+
+        if (ctx->purge_l2_after_response && r == r->main) {
+            if (purge_marker != NULL) {
+                l1_cache_lock(&l1_cache_conf->shpool->mutex);
+                purge_marker->pid = ngx_pid;
+                purge_marker->bytes_or_entry = 0;
+                purge_marker->flags = L1_CAPTURE_TRACK_ONLY
+                                      | L1_CAPTURE_PURGE_PENDING
+                                      | L1_CAPTURE_FILL_DONE
+                                      | L1_CAPTURE_INVALIDATION
+                                      | L1_CAPTURE_PURGE_RETRYING;
+                ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+
+                if (ctx->capture_cleanup != NULL) {
+                    ctx->capture_cleanup->handler = NULL;
+                    ctx->capture_cleanup = NULL;
+                }
+                ctx->tracked = 0;
+                ctx->capture = NULL;
+            }
+
+            if (l1_cache_start_l2_purge(r, &ctx->proxy_key,
+                                        purge_marker) != NGX_OK)
+            {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "l1 cache could not schedule native L2 purge");
+                if (purge_marker != NULL) {
+                    l1_cache_lock(&l1_cache_conf->shpool->mutex);
+                    purge_marker->flags |= L1_CAPTURE_CHECK_FAILED;
+                    purge_marker->flags &= ~L1_CAPTURE_PURGE_RETRYING;
+                    ngx_shmtx_unlock(&l1_cache_conf->shpool->mutex);
+                }
+            }
         }
         ctx->invalidate_after_response = 0;
         ctx->purge_l2_after_response = 0;
@@ -4912,7 +4956,8 @@ l1_cache_capture_key(ngx_http_l1_cache_capture_t *capture, size_t *len)
  * Why: PURGE must see fills even when L1 later rejects their response body.
  */
 static ngx_int_t
-l1_cache_track_request(ngx_http_request_t *r, ngx_http_l1_cache_ctx_t *ctx)
+l1_cache_track_request(ngx_http_request_t *r, ngx_http_l1_cache_ctx_t *ctx,
+    ngx_flag_t allow_pending)
 {
     ngx_pool_cleanup_t *cleanup;
     ngx_queue_t *q;
@@ -4940,7 +4985,9 @@ l1_cache_track_request(ngx_http_request_t *r, ngx_http_l1_cache_ctx_t *ctx)
          q = ngx_queue_next(q))
     {
         active = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
-        if (!(active->flags & L1_CAPTURE_PURGE_PENDING)) {
+        if (allow_pending
+            || !(active->flags & L1_CAPTURE_PURGE_PENDING))
+        {
             continue;
         }
         active_key = l1_cache_capture_key(active, &active_key_len);
@@ -4964,7 +5011,8 @@ l1_cache_track_request(ngx_http_request_t *r, ngx_http_l1_cache_ctx_t *ctx)
     capture->generation = ctx->generation;
     capture->bytes_or_entry = 0;
     capture->key_len = ctx->key.len;
-    capture->flags = L1_CAPTURE_TRACK_ONLY;
+    capture->flags = L1_CAPTURE_TRACK_ONLY
+                     | (allow_pending ? L1_CAPTURE_PURGE_PENDING : 0);
     ngx_memcpy(capture->key, ctx->key.data, ctx->key.len);
     ngx_queue_insert_head(&l1_cache_conf->sh->captures, &capture->queue);
     (void) ngx_atomic_fetch_add(&l1_cache_conf->sh->tracked_requests, 1);
@@ -5109,6 +5157,14 @@ l1_cache_reap_captures_locked(void)
         next = ngx_queue_next(q);
         capture = ngx_queue_data(q, ngx_http_l1_cache_capture_t, queue);
         if (capture->flags & L1_CAPTURE_FILL_DONE) {
+            if ((capture->flags & L1_CAPTURE_INVALIDATION)
+                && capture->pid != 0
+                && kill(capture->pid, 0) == -1 && ngx_errno == NGX_ESRCH)
+            {
+                capture->pid = 0;
+                capture->flags |= L1_CAPTURE_CHECK_FAILED;
+                capture->flags &= ~L1_CAPTURE_PURGE_RETRYING;
+            }
             continue;
         }
         if (kill(capture->pid, 0) != -1 || ngx_errno != NGX_ESRCH) continue;
