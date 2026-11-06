@@ -1,7 +1,25 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r62.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r66.
+
+## Aktuelle Abschlussliste
+
+Es bleiben drei gebündelte Arbeitspakete. Historische `OPEN`-Zeilen weiter
+unten beschreiben den damaligen Stand und sind nicht automatisch aktuelle
+offene Fehler. Erfolgreiche Nachweise werden wiederverwendet; sie werden nicht
+erneut ausgeführt.
+
+| Nr. | Offenes Paket | Abschlussbedingung |
+|---|---|---|
+| 1 | RFC-/HTTP-Restmatrix | Die für das aktuelle Modul anwendbaren, noch nicht belegten Semantiken gegen den bestehenden Codepfad bewerten; nur tatsächliche Fehler korrigieren und gezielt verifizieren. Bewusste Force-Ausnahmen separat kennzeichnen. |
+| 2 | PURGE-/Invalidierungsreste | Die in den aktuellen PURGE-Nachweisen noch ausdrücklich fehlenden Rennen bewerten und gezielt schließen; bestätigte r63-304-Revalidierung sowie bereits bestandene Abbruch- und Worker-Fälle nicht wiederholen. |
+| 3 | Konkurrenz-/Ressourcenreste | Die noch nicht belegten Speicher-, Capture-, Reload- und parallelen Request-Pfade aus der bestehenden Abnahmeliste abschließen oder mit konkretem Codehindernis als offen dokumentieren. Keine Dauer- oder Langzeitprüfung hinzufügen. |
+
+Abschluss bedeutet: Diese drei Pakete sind einmal abgearbeitet, die betroffenen
+Änderungen auf dem installierten Modul gegen Stock-NGINX gezielt verifiziert,
+und die Matrix weist alle übrigen Ergebnisse als `PASS`, `FORCE`, `N/A` oder
+konkretes `OPEN` aus. Danach werden keine weiteren Prüfpunkte ergänzt.
 
 ## Pre-search reasoning record (r22)
 
