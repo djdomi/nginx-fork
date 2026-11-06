@@ -5,7 +5,7 @@ if [ -z "$_nginx_pkgver" ]; then
 	die "Set NGINX_PKGVER to the installed nginx package version."
 fi
 pkgver=${_nginx_pkgver%-r*}
-pkgrel=${NGINX_MOD_PKGREL:-1}
+pkgrel=${NGINX_MOD_PKGREL:-74}
 pkgdesc="Shared-memory L1 response cache module for NGINX"
 url="https://github.com/djdomi/nginx-fork"
 arch="x86_64"

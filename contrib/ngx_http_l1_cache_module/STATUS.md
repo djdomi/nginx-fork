@@ -1,21 +1,20 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r73.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r74.
 
 ## Aktuelle Abschlussliste
 
-Es bleiben zwei gebündelte Arbeitspakete. Historische `OPEN`-Zeilen weiter
+Es bleibt ein gebündeltes Arbeitspaket. Historische `OPEN`-Zeilen weiter
 unten beschreiben den damaligen Stand und sind nicht automatisch aktuelle
 offene Fehler. Erfolgreiche Nachweise werden wiederverwendet; sie werden nicht
 erneut ausgeführt.
 
 | Nr. | Offenes Paket | Abschlussbedingung |
 |---|---|---|
-| 1 | RFC-/HTTP-Restmatrix | Die für das aktuelle Modul anwendbaren, noch nicht belegten Semantiken gegen den bestehenden Codepfad bewerten; nur tatsächliche Fehler korrigieren und gezielt verifizieren. Bewusste Force-Ausnahmen separat kennzeichnen. |
-| 2 | Konkurrenz-/Ressourcenreste | Die noch nicht belegten Speicher-, Capture-, Reload- und parallelen Request-Pfade aus der bestehenden Abnahmeliste abschließen oder mit konkretem Codehindernis als offen dokumentieren. Keine Dauer- oder Langzeitprüfung hinzufügen. |
+| 1 | Konkurrenz-/Ressourcenreste | Die noch nicht belegten Speicher-, Capture-, Reload- und parallelen Request-Pfade aus der bestehenden Abnahmeliste abschließen oder mit konkretem Codehindernis als offen dokumentieren. Keine Dauer- oder Langzeitprüfung hinzufügen. |
 
-Abschluss bedeutet: Diese zwei Pakete sind einmal abgearbeitet, die betroffenen
+Abschluss bedeutet: Dieses Paket ist einmal abgearbeitet, die betroffenen
 Änderungen auf dem installierten Modul gegen Stock-NGINX gezielt verifiziert,
 und die Matrix weist alle übrigen Ergebnisse als `PASS`, `FORCE`, `N/A` oder
 konkretes `OPEN` aus. Danach werden keine weiteren Prüfpunkte ergänzt.
@@ -32,6 +31,19 @@ Slab-Allokationsfehler liefert denselben `NGX_ERROR`-Pfad wie das geprüfte
 Trackerlimit; unsichere Requests werden damit vor dem Origin abgewiesen und
 normale Fills umgehen beide Cache-Schichten. Dieser äquivalente Fehlerzweig
 wurde nicht separat injiziert.
+
+### Abgeschlossenes Paket: RFC-/HTTP-Restmatrix
+
+Die aktuelle Request-/Response-Policy wurde gegen den Kontrollfluss geprüft
+und in der darunterstehenden RFC-Matrix eingetragen. Ein konkreter Fehler bei
+`no-store, only-if-cached` wurde in r74 behoben und auf dem installierten APK
+gegen Stock-NGINX für vorhandene L1-, vorhandene L2- und fehlende Objekte
+gezielt verifiziert. Vorhandene Age-, Conditional-, Vary-, Credential-,
+Slice-, no-cache- und no-store-Nachweise wurden wiederverwendet. Nicht sicher
+unterstützte L1-Fälle sind ausdrücklich als native Verarbeitung oder BYPASS
+klassifiziert; Force-Abweichungen bleiben gesondert gekennzeichnet. Es wurde
+keine vollständige Behauptung aufgestellt, dass L1 jede optionale
+RFC-Cachefunktion implementiert.
 
 ## Pre-search reasoning record (r22)
 
@@ -888,6 +900,62 @@ Bypass-Variablen in PRECONTENT verfügbar sind, läuft ebenfalls nach dem Merge.
 Die Konfigurationsabsicherung und diese zwei Request-Direktiven sind gezielt
 abgeschlossen. Die übrige RFC-/HTTP-Matrix sowie verbleibende PURGE- und
 Konkurrenz-/Ressourcenfälle bleiben offen.
+
+## r74: gespeicherte Antwort bei `no-store, only-if-cached` verwenden
+
+Ein Request mit `no-store` und `only-if-cached` darf eine bereits gespeicherte
+Antwort verwenden; `no-store` verbietet die Speicherung des aktuellen
+Requests/Responses und gilt laut RFC 9111 §5.2.1.5 nicht für eine bereits
+gespeicherte Antwort. Die Policy ließ diese Kombination bisher fälschlich als
+Cache-Bypass durch. Sie erlaubt jetzt den Lookup, behält aber `proxy_no_cache`
+und verhindert dadurch neue L1- oder L2-Aufnahmen. Andere nicht unterstützte
+Direktivkombinationen bleiben im konservativen Bypass.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r74 APK-Build und Signatur | PASS | `NGINX_MOD_PKGREL=74 abuild -r` gegen Alpine `nginx-mod-dev=1.30.6-r0`; `apk verify` erfolgreich. APK-SHA-256 `89dce69406694d33bfefc28da9c75d8fd1a5e464e9d2ddf90cf95832ace84499`. |
+| Installation und Stock-NGINX-Konfiguration | PASS | r74 über r73 installiert; unverändertes NGINX 1.30.6 bestand `sudo nginx -t`. |
+| Bereits gespeichertes L1-Objekt mit `no-store, only-if-cached` | PASS | HTTP 200 `L1_HIT`; Body-SHA-256 identisch zum ursprünglichen Fill; kein weiterer Origin-Request. |
+| Bereits gespeichertes L2-Objekt mit `no-store, only-if-cached` | PASS | Nach Frontend-Neustart (L1 leer) HTTP 200 `L1_MISS_L2_HIT`; der anschließende normale `only-if-cached`-Abruf blieb `L1_MISS_L2_HIT`, also wurde der no-store-Request nicht in L1 aufgenommen. Beide Bodies waren bytegleich zum Fill. |
+| Cache-Miss mit `no-store, only-if-cached` | PASS | HTTP 504; Originlog unverändert, somit kein Origin-Request und keine Speicherung. |
+| Gepinnter L1-HIT während Eviction und Speicherlast | PASS | Stock-NGINX 1.30.6, Shared-Zone 8 MiB, 512-KiB-Objekte. Während eines gebremsten L1-HITs meldeten die Metriken `pins=1`; nach Aufnahme von 14 weiteren Objekten blieb `pins=1`, `evictions=3`, `building=0`, `used=6297312` Bytes und `objects=12`. Nach Abschluss wurde `pins=0`; der Folgezugriff blieb `L1_HIT`. Fill, laufender HIT und Folge-HIT waren bytegleich (SHA-256 `86df69acb1ae182a182e3f0d13d65c074ebc8cb648fde1d1180c32a3a1a60f01`). Temporärer Lauf `/tmp/l1-pin-evict-r74c`. |
+
+Temporärer Lauf: `/tmp/l1-oic-nostore-r74`. Die Prüfung deckt die
+RFC-9111-Request-no-store-Semantik und die getrennte L1-/L2-Behandlung ab;
+bereits bestandene andere Cache-Control- und Conditional-Läufe wurden nicht
+wiederholt.
+
+Der Speicher-/Pinning-Lauf bestätigt zugleich, dass die Verdrängung bei einem
+laufenden L1-HIT keine gepinnten Body-Blöcke freigibt und die gemeldete
+Nutzlastbelegung unter dem 80-%-Arbeitslimit der 8-MiB-Zone blieb. Er deckt
+keinen Dauerlauf und keine absichtliche Slab-Allokationsfehler-Injektion ab.
+
+## RFC-9111-/RFC-9110-Restmatrix (aktueller Quellstand r74)
+
+Die Matrix bewertet die Zuständigkeit des Moduls und des nativen Proxy-Caches.
+`BYPASS` bedeutet, dass L1 den Fall nicht speichert oder beantwortet und die
+Anfrage an die normale NGINX-Verarbeitung geht; es ist kein Fehlerstatus.
+
+| Abschnitt | Verantwortlicher Pfad | Befund | Status / Nachweis |
+|---|---|---|---|
+| [RFC 9111 §3](https://www.rfc-editor.org/rfc/rfc9111.html#section-3) Speicherung | `l1_cache_cacheable()`, `l1_cache_admit_response()`, nativer L2-Commit-Check | L1 nimmt nur vollständige GET-200 und validierte Slice-206 auf; andere Status und unvollständige Bodies umgehen L1. L1-READY setzt erfolgreichen nativen L2-Commit voraus. | PASS für implementierten Umfang; L2-Commit- und Schreibfehlernachweise oben. |
+| [RFC 9111 §3.1](https://www.rfc-editor.org/rfc/rfc9111.html#section-3.1) Header und Trailer | `l1_cache_cacheable()`, `l1_cache_capture_metadata()` | Unbekannte oder nicht sicher gespeicherte Antwortheader führen im Normalmodus zu L1-BYPASS. Hop-by-hop- und NGINX-Steuerheader werden nicht im Force-Modus wiedergegeben. Bei aktivierten Proxy-Trailern umgeht L1 die Antwort; native L2 bleibt Owner. | PASS als konservativer Bypass; Trailer-Lauf r67. |
+| [RFC 9111 §3.3–3.4](https://www.rfc-editor.org/rfc/rfc9111.html#section-3.3) unvollständige und partielle Antworten | Slice-Filter und `l1_cache_slice_segment()` | Keine Veröffentlichung partieller Captures. Slice-206 benötigt konsistente Grenzen, Länge und starken ETag; nicht unterstützte Range-Pfade umgehen L1. | PASS für getestete Slice-Fälle; r25 deckt Kalt-/Warmlauf, mittleres/finales Slice und nicht ausgerichtete Range ab. |
+| [RFC 9111 §3.5](https://www.rfc-editor.org/rfc/rfc9111.html#section-3.5) Authorization | `l1_cache_request_allowed()`, `l1_cache_request_key()` | Normalmodus umgeht Credential-Requests. Force-Modus trennt Varianten mit vollständigem Request-Header-Fingerprint. | PASS für geprüfte Force-/Variantenfälle in der bestehenden Nachweismatrix. |
+| [RFC 9111 §4.1](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.1) Vary | L1-Admission und Force-Key | Normalmodus nimmt Vary-Antworten nicht in L1 auf; native L2 verwaltet Varianten. Force verwendet einen getrennten Schlüssel je vollständigem Request-Headerkontext. | PASS für geprüfte Variantenisolation; bewusstes FORCE bei administrativ aktiviertem Force-Modus. |
+| [RFC 9111 §4.2–4.2.3](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.2) Freshness und Age | `l1_cache_update_l2_state()`, `l1_cache_capture_metadata()`, L1-Ablauf | L1-Ablauf ist auf die native L2-Gültigkeit begrenzt. Initial Age berücksichtigt apparent age und response delay; L1-Folgeantworten erhöhen resident time. | PASS für Origin-, L2- und L1-Age-Läufe sowie Überlauf-/Darstellungsfehler-Fallback. |
+| [RFC 9111 §4.2.4](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.2.4) stale | Native NGINX-L2-Cache | L1 liefert abgelaufene Einträge nicht aus; stale-Konfiguration und Revalidierung bleiben dem nativen L2 überlassen. | PASS durch Zuständigkeitsgrenze; L1-Gültigkeit endet spätestens bei nativer `valid_sec`. |
+| [RFC 9111 §4.3](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.3) Validierung / 304 | Native NGINX-Upstream und Proxy-Cache | Bedingte Clientanfragen umgehen L1; native NGINX-Verarbeitung entscheidet 304/200/412 und aktualisiert L2. | PASS für native 304-Revalidierung, L1-Promotion und Force-Preconditions in der bestehenden Matrix. |
+| [RFC 9111 §4.4](https://www.rfc-editor.org/rfc/rfc9111.html#section-4.4) Invalidierung | L1-Tracker plus nativer PURGE | Unsafe Methoden und PURGE blockieren Wiederverwendung bis zur nativen L2-Invalidierung; geprüfte Fehler bleiben als Retry-Tombstones gesperrt. | PASS; abgeschlossenes Invalidierungspaket oben. |
+| [RFC 9111 §5.2.1](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.1) Request-Direktiven | `l1_cache_request_cache_policy()` plus native `proxy_cache_bypass`/`proxy_no_cache` | `no-cache` und nicht unterstützte Modifikatoren umgehen Cache-Lesezugriffe. `no-store, only-if-cached` darf bereits gespeicherte L1-/L2-Antworten nutzen, speichert aber nichts neu. Nicht erfüllbare `only-if-cached`-Fälle geben 504 ohne Originzugriff zurück. | PASS für no-cache/no-store, OIC-HIT/MISS und r74 L1-/L2-no-store-OIC. |
+| [RFC 9111 §5.2.2](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2) Response-Direktiven | L1-Admission plus native L2-Policy | Normalmodus lehnt no-store, private und no-cache für L1 ab; erforderliche native `proxy_no_cache`-Anbindung wird bei Konfigurationsprüfung erzwungen. Force darf diese ausdrücklich vorgesehenen Cache-Policies überschreiben. | PASS für no-store/no-cache und Pflichtkonfiguration; FORCE bleibt auf aktivierte Locations beschränkt. |
+| [RFC 9110 §13](https://www.rfc-editor.org/rfc/rfc9110.html#section-13) Conditional Requests | Native NGINX-Filter; L1-Request-Admission | `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since` und `If-Range` werden nicht durch L1-HIT beantwortet oder entfernt. | PASS für geprüfte 304-/412-Fälle; übrige Conditional-Requests gehen an NGINX. |
+| Cache-Key und L2-Identität | `l1_cache_request_key()`, `l1_cache_proxy_identity_matches()` | L1 verlangt exakt die konfigurierte `$l1_cache_key`-Integration und passende L2-Zone; inkompatible Proxy-Konfigurationen umgehen L1. | PASS für konfigurierte Integration; abweichender nativer Key wurde gezielt als L1-BYPASS nachgewiesen. |
+
+Für Direktiven und Antwortformen, die L1 nicht sicher eigenständig auswertet,
+ist der dokumentierte Ausgang der native NGINX-Pfad oder ein sicherer BYPASS.
+Die Matrix beansprucht keine L1-Unterstützung für nicht genannte Statuscodes,
+Heuristiken, beliebige Vary-Varianten oder nicht validierte Range-Formen.
 
 | Ressourcenfall | Ergebnis | Nachweis |
 |---|---|---|

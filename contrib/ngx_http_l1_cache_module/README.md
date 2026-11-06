@@ -204,10 +204,14 @@ bypass L1.
 The L1 admission check parses response `Cache-Control` directive names rather
 than searching for substrings. Quoted extension values may contain commas or
 text such as `no-cache` without being mistaken for a directive. Malformed
-directive syntax bypasses L1 admission. For requests without force mode, any
-request `Cache-Control` or `Pragma` header bypasses L1 and L2 reads. A request
-`no-store` directive also prevents the native L2 cache write; other request
-directives may still allow the fetched response to refresh L2. Credentialed
+directive syntax bypasses L1 admission. For requests without force mode,
+request `Cache-Control` or `Pragma` directives that the module does not
+implement bypass L1 and L2 reads. A standalone `only-if-cached` request can
+use an existing L1 or L2 response. Combining it with request `no-store` still
+allows reuse of an already stored response, but prevents promotion or storage
+of a new response in either cache. For other `no-store` requests, the module
+bypasses cache reads and prevents the native L2 cache write; other request
+directives may allow a fetched response to refresh L2. Credentialed
 requests (`Authorization`, `Proxy-Authorization`, `Cookie`, or `Cookie2`) also
 bypass L2 reads and writes in this conservative mode. This request policy is
 enforced by the NGINX integration because `proxy_cache_bypass` alone does not

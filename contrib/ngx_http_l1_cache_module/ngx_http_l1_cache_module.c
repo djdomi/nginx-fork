@@ -3300,6 +3300,17 @@ l1_cache_request_cache_policy(ngx_http_request_t *r,
                         if (ngx_strlchr(start, end, '=') != NULL) {
                             only_if_cached_only = 0;
                         }
+                    } else if (len == sizeof("no-store") - 1
+                               && ngx_strncasecmp(start,
+                                                  (u_char *) "no-store", len)
+                                  == 0)
+                    {
+                        /* What: Allows OIC to reuse an already-stored response.
+                         * Why: Request no-store forbids storing this exchange,
+                         * not using a representation that was stored earlier.
+                         * From: RFC 9111 §5.2.1.5.
+                         */
+                        ctx->request_no_store = 1;
                     } else {
                         only_if_cached_only = 0;
                     }
@@ -3340,8 +3351,7 @@ l1_cache_request_cache_policy(ngx_http_request_t *r,
     if (only_if_cached) {
         ctx->request_only_if_cached = 1;
 
-        if (only_if_cached_only && !other_bypass
-            && !ctx->request_no_store)
+        if (only_if_cached_only && !other_bypass)
         {
             ctx->request_bypass = 0;
         }
@@ -4006,7 +4016,7 @@ l1_cache_admit_response(ngx_http_request_t *r,
     ngx_http_proxy_loc_conf_t *plcf;
 
     if (ctx == NULL || ctx->admit || ctx->hit || !ctx->lookup
-        || ctx->tracking_failed
+        || ctx->tracking_failed || ctx->request_no_store
         || r->main->method != NGX_HTTP_GET
         || (r != r->main && !slice)
         || !l1_cache_request_allowed(r->main, slice, ctx->force, ctx)
