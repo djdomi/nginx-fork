@@ -836,3 +836,7 @@ unnötig ein Shared-Memory-Request-Tracker reserviert.
 | Trailer und `only-if-cached` | PASS für diesen Lauf | Zwei normale GETs lieferten jeweils HTTP 200, Trailer und `X-L1-Cache-Status: BYPASS`/`X-L2: BYPASS`. Der dritte Request mit `Cache-Control: only-if-cached` ergab HTTP 504. Origin erhielt exakt zwei Requests, also keinen für den 504-Fall. Beide normalen Bodies waren bytegleich. Fixture `/tmp/l1-trailers-r66.JyhRk9`. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r66.apk`.
+
+| Ressourcenfall | Ergebnis | Nachweis |
+|---|---|---|
+| Limit gleichzeitiger PURGE-Tracker | PASS für diesen Lauf | r66, `l1_cache_max_tracked_requests 1`: eine Antwort hielt den einzigen Tracker bis zu verzögerten Response-Headern belegt. Die parallele zweite URL wurde als `X-L1-Cache-Status: BYPASS` und `X-L2: BYPASS` weitergeleitet. Nach Freigabe des Trackers blieb sie uncached: nächster Abruf `L1_MISS_L2_MISS`. Originfolge `/slow`, `/other`, `/other`; 65536-Byte-Erstantwort vollständig. Temporärer Lauf `/tmp/l1-tracker-limit-r66.LCtJul`. |
