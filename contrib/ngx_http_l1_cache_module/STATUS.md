@@ -1,7 +1,7 @@
 # Technischer Status des eigenständigen L1-Moduls
 
 Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
-`nginx-1.30.6-r0`, musl; aktuelles Paket r61.
+`nginx-1.30.6-r0`, musl; aktuelles Paket r62.
 
 ## Pre-search reasoning record (r22)
 
@@ -753,3 +753,19 @@ Cleanup-Handler, damit kein doppelter Finalizer ausgeführt wird.
 | Gesamtabnahme PURGE/RFC/Stock-Modul | OPEN | Der gezielte Client-Abbruch-, PURGE-, Persistenz- und Promotionspfad ist nachgewiesen. Weitere RFC-, Conditional-, 304-, Varianten-, Fehler- und ABI-Abnahmepunkte bleiben offen. |
 
 Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r61.apk`.
+
+## r62: L2-304-Revalidierung im Cache-Status ausweisen
+
+NGINX verwendet bei erfolgreicher 304-Revalidierung den vorhandenen L2-Body
+und aktualisiert dessen Frische. Der Modulstatus bezeichnete diesen Fall
+bisher fälschlich als `L1_MISS_L2_MISS`. Er wird jetzt eindeutig als
+`L1_MISS_L2_REVALIDATED` ausgewiesen; der Origin-Zähler zählt weiterhin die
+Validatoranfrage.
+
+| Prüfschritt | Ergebnis | Nachweis |
+|---|---|---|
+| r62 APK-Build, Verifikation, Installation und Systemkonfiguration | PASS | Alpine musl, `nginx-1.30.6-r0`; APK `apk verify` OK, Installation über r61, unverändertes `/etc/nginx/nginx.conf` bestand `nginx -t`. SHA-256 `3376fa2463cfd2f2fe595835dcbdd908e8b8f7d15226ec2bae75efea196226c0`. |
+| Native L2-304-Revalidierung und anschließende L1-Aufnahme | PASS für gezielten Lauf | Stock-NGINX 1.30.6, zwei Worker, persistierter abgelaufener 512-KiB-L2-Eintrag: Revalidierungsrequests erhielten HTTP 200 mit `L1_MISS_L2_REVALIDATED`; der Origin antwortete jeweils 304. Der Folgezugriff war `L1_HIT`. Alle drei Bodies waren 524288 Byte und bytegleich, SHA-256 `4480bd37be84462ae5b45c47cf5b4546c92d2d2360853571c43984dd982499ea`. Temporärer Lauf `/tmp/l1-revalidate-304-r61`. |
+| Vollständige PURGE-/RFC-Abnahme | OPEN | Der isolierte 304-Revalidierungs- und Promotionspfad ist nachgewiesen. PURGE-Rennen während 304-Revalidierung und weitere offene RFC-/Konkurrenz-/Ressourcenfälle bleiben offen. |
+
+Das aktuelle APK liegt unter `alpine/dist/nginx-mod-l1-cache-1.30.6-r62.apk`.

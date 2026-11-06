@@ -4238,6 +4238,10 @@ l1_cache_header_filter(ngx_http_request_t *r)
             cache_status = "BYPASS";
             cache_status_len = sizeof("BYPASS") - 1;
 
+        } else if (ctx != NULL && ctx->lookup && ctx->l2_revalidated) {
+            cache_status = "L1_MISS_L2_REVALIDATED";
+            cache_status_len = sizeof("L1_MISS_L2_REVALIDATED") - 1;
+
         } else if (ctx != NULL && ctx->lookup && ctx->l2_hit) {
             cache_status = "L1_MISS_L2_HIT";
             cache_status_len = sizeof("L1_MISS_L2_HIT") - 1;
