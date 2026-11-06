@@ -5,7 +5,7 @@ Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
 
 ## Aktuelle Abschlussliste
 
-Es bleiben drei gebündelte Arbeitspakete. Historische `OPEN`-Zeilen weiter
+Es bleiben zwei gebündelte Arbeitspakete. Historische `OPEN`-Zeilen weiter
 unten beschreiben den damaligen Stand und sind nicht automatisch aktuelle
 offene Fehler. Erfolgreiche Nachweise werden wiederverwendet; sie werden nicht
 erneut ausgeführt.
@@ -13,13 +13,25 @@ erneut ausgeführt.
 | Nr. | Offenes Paket | Abschlussbedingung |
 |---|---|---|
 | 1 | RFC-/HTTP-Restmatrix | Die für das aktuelle Modul anwendbaren, noch nicht belegten Semantiken gegen den bestehenden Codepfad bewerten; nur tatsächliche Fehler korrigieren und gezielt verifizieren. Bewusste Force-Ausnahmen separat kennzeichnen. |
-| 2 | PURGE-/Invalidierungsreste | Die in den aktuellen PURGE-Nachweisen noch ausdrücklich fehlenden Rennen bewerten und gezielt schließen; bestätigte r63-304-Revalidierung sowie bereits bestandene Abbruch- und Worker-Fälle nicht wiederholen. |
-| 3 | Konkurrenz-/Ressourcenreste | Die noch nicht belegten Speicher-, Capture-, Reload- und parallelen Request-Pfade aus der bestehenden Abnahmeliste abschließen oder mit konkretem Codehindernis als offen dokumentieren. Keine Dauer- oder Langzeitprüfung hinzufügen. |
+| 2 | Konkurrenz-/Ressourcenreste | Die noch nicht belegten Speicher-, Capture-, Reload- und parallelen Request-Pfade aus der bestehenden Abnahmeliste abschließen oder mit konkretem Codehindernis als offen dokumentieren. Keine Dauer- oder Langzeitprüfung hinzufügen. |
 
-Abschluss bedeutet: Diese drei Pakete sind einmal abgearbeitet, die betroffenen
+Abschluss bedeutet: Diese zwei Pakete sind einmal abgearbeitet, die betroffenen
 Änderungen auf dem installierten Modul gegen Stock-NGINX gezielt verifiziert,
 und die Matrix weist alle übrigen Ergebnisse als `PASS`, `FORCE`, `N/A` oder
 konkretes `OPEN` aus. Danach werden keine weiteren Prüfpunkte ergänzt.
+
+### Abgeschlossenes Paket: PURGE und Invalidierung
+
+Die aktuelle Invalidierungs-Restliste ist abgearbeitet. Wiederverwendete
+Nachweise decken PURGE während 304-Revalidierung (r63), Client- und
+Worker-Abbruch (r61/r59), fehlgeschlagenen nativen PURGE (r58), das
+Trackerlimit (r66/r68) und Invalidierung nach unsicheren Methoden (r69) ab. Der gezielte
+r73-Lauf mit 16 gleichzeitigen erfolgreichen Writes desselben Keys bestätigt,
+dass anschließend kein alter L1- oder L2-Inhalt wiederverwendet wird. Ein
+Slab-Allokationsfehler liefert denselben `NGX_ERROR`-Pfad wie das geprüfte
+Trackerlimit; unsichere Requests werden damit vor dem Origin abgewiesen und
+normale Fills umgehen beide Cache-Schichten. Dieser äquivalente Fehlerzweig
+wurde nicht separat injiziert.
 
 ## Pre-search reasoning record (r22)
 
