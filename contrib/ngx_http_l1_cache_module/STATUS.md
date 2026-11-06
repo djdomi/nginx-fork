@@ -5,19 +5,16 @@ Stand: Arbeitsbranch des dynamischen Moduls, Alpine x86_64,
 
 ## Aktuelle Abschlussliste
 
-Es bleibt ein gebündeltes Arbeitspaket. Historische `OPEN`-Zeilen weiter
-unten beschreiben den damaligen Stand und sind nicht automatisch aktuelle
-offene Fehler. Erfolgreiche Nachweise werden wiederverwendet; sie werden nicht
-erneut ausgeführt.
+Für die zuvor benannte Konkurrenz-/Ressourcen-Restposition sind **0 Punkte
+offen**. Die noch fehlende echte Slab-Allokationsfehler-Prüfung wurde einmalig
+mit dem unveränderten Alpine-NGINX 1.30.6 und dem installierten r74-Modul
+ausgeführt und ist unten dokumentiert. Reload bei laufender Antwort sowie
+acht Worker mit 100 parallelen L1-Hits sind ebenfalls nachgewiesen.
 
-| Nr. | Offenes Paket | Abschlussbedingung |
-|---|---|---|
-| 1 | Konkurrenz-/Ressourcenreste | Die noch nicht belegten Speicher-, Capture-, Reload- und parallelen Request-Pfade aus der bestehenden Abnahmeliste abschließen oder mit konkretem Codehindernis als offen dokumentieren. Keine Dauer- oder Langzeitprüfung hinzufügen. |
-
-Abschluss bedeutet: Dieses Paket ist einmal abgearbeitet, die betroffenen
-Änderungen auf dem installierten Modul gegen Stock-NGINX gezielt verifiziert,
-und die Matrix weist alle übrigen Ergebnisse als `PASS`, `FORCE`, `N/A` oder
-konkretes `OPEN` aus. Danach werden keine weiteren Prüfpunkte ergänzt.
+Historische `OPEN`-Zeilen weiter unten beschreiben den jeweiligen damaligen
+Stand; sie sind nicht automatisch aktuelle offene Fehler. Bestehende Tests
+wurden nicht wiederholt. Dauer- und Langzeitprüfungen bleiben wie vereinbart
+zurückgestellt.
 
 ### Abgeschlossenes Paket: PURGE und Invalidierung
 
@@ -26,11 +23,10 @@ Nachweise decken PURGE während 304-Revalidierung (r63), Client- und
 Worker-Abbruch (r61/r59), fehlgeschlagenen nativen PURGE (r58), das
 Trackerlimit (r66/r68) und Invalidierung nach unsicheren Methoden (r69) ab. Der gezielte
 r73-Lauf mit 16 gleichzeitigen erfolgreichen Writes desselben Keys bestätigt,
-dass anschließend kein alter L1- oder L2-Inhalt wiederverwendet wird. Ein
-Slab-Allokationsfehler liefert denselben `NGX_ERROR`-Pfad wie das geprüfte
-Trackerlimit; unsichere Requests werden damit vor dem Origin abgewiesen und
-normale Fills umgehen beide Cache-Schichten. Dieser äquivalente Fehlerzweig
-wurde nicht separat injiziert.
+dass anschließend kein alter L1- oder L2-Inhalt wiederverwendet wird.
+Unsichere Requests werden bei fehlgeschlagenem PURGE-Tracking vor dem Origin
+abgewiesen; normale Fills umgehen beide Cache-Schichten. Die separate
+Slab-Allokationsfehler-Injektion ist im r74-Nachweis unten dokumentiert.
 
 ### Abgeschlossenes Paket: RFC-/HTTP-Restmatrix
 
@@ -920,6 +916,9 @@ Direktivkombinationen bleiben im konservativen Bypass.
 | Cache-Miss mit `no-store, only-if-cached` | PASS | HTTP 504; Originlog unverändert, somit kein Origin-Request und keine Speicherung. |
 | Gepinnter L1-HIT während Eviction und Speicherlast | PASS | Stock-NGINX 1.30.6, Shared-Zone 8 MiB, 512-KiB-Objekte. Während eines gebremsten L1-HITs meldeten die Metriken `pins=1`; nach Aufnahme von 14 weiteren Objekten blieb `pins=1`, `evictions=3`, `building=0`, `used=6297312` Bytes und `objects=12`. Nach Abschluss wurde `pins=0`; der Folgezugriff blieb `L1_HIT`. Fill, laufender HIT und Folge-HIT waren bytegleich (SHA-256 `86df69acb1ae182a182e3f0d13d65c074ebc8cb648fde1d1180c32a3a1a60f01`). Temporärer Lauf `/tmp/l1-pin-evict-r74c`. |
 | 50 parallele L1-HITs über vier Worker | PASS | Stock-Alpine-NGINX 1.30.6 (musl), `worker_processes 4`, ein vorgewärmtes 512-KiB-Objekt; 50 parallele Clients erhielten HTTP 200 und `L1_HIT`. Alle 50 Bodies hatten denselben SHA-256 wie der Fill (`61f7a39463e99761bebdf9b549864f504875ea79805d10b357a6ea14c9845f69`); kein HTTP-Fehler. Temporärer Lauf `/tmp/l1-4w-50c-r74`. |
+| 100 parallele L1-HITs über acht Worker | PASS | Vorhandene Laufartefakte geprüft, kein Test wiederholt: 100 Header- und 100 Bodydateien; alle 100 Antworten HTTP 200 und `L1_HIT`; alle Bodies SHA-256 `d801e2e1fa995b578d8a545fa23489e651ba0ca9020955c93be7b41204490c1e`. Temporärer Lauf `/tmp/l1-8w-100c-r74`. |
+| Reload während eines laufenden, gepinnten L1-HITs | PASS | Ein langsamer 512-KiB-L1-HIT lief während eines `l1_cache_key_id`-Wechsels und NGINX-Reloads. Laufender Body sowie anschließende L2-Promotion und L1-Folge-HIT waren bytegleich (SHA-256 `8a42d14ebd843d638934e397405b73c94586c790adfc8bf2fecb27f1297d0751`). Nach dem Reload kam der nächste Request erwartungsgemäß als `L1_MISS_L2_HIT`, der darauffolgende als `L1_HIT`. Temporärer Lauf `/tmp/l1-reload-active-pin-r74`. |
+| Echte Shared-Memory-Slab-Allokationsfehler | PASS für gezielten Fehlerpfad | GDB ließ bei zwei echten Requests auf dem unveränderten Stock-NGINX 1.30.6 `ngx_slab_alloc_locked(65536)` fehlschlagen (Bodyblock-Allokation). Beide Antworten blieben HTTP 200 und bytegleich (SHA-256 `8a42d14ebd843d638934e397405b73c94586c790adfc8bf2fecb27f1297d0751`); Statusfolge `L1_MISS_L2_MISS`, danach `L1_MISS_L2_HIT`, also kein READY-L1-Objekt und reguläre L2-Wiederverwendung. Temporärer Lauf `/tmp/l1-slabfail-r74`. Die Metrik wurde in diesem Lauf nicht separat abgefragt; der geprüfte Fehlerzweig erhöht `allocation_failures` und verwirft die Aufnahme. |
 
 Temporärer Lauf: `/tmp/l1-oic-nostore-r74`. Die Prüfung deckt die
 RFC-9111-Request-no-store-Semantik und die getrennte L1-/L2-Behandlung ab;
@@ -928,8 +927,8 @@ wiederholt.
 
 Der Speicher-/Pinning-Lauf bestätigt zugleich, dass die Verdrängung bei einem
 laufenden L1-HIT keine gepinnten Body-Blöcke freigibt und die gemeldete
-Nutzlastbelegung unter dem 80-%-Arbeitslimit der 8-MiB-Zone blieb. Er deckt
-keinen Dauerlauf und keine absichtliche Slab-Allokationsfehler-Injektion ab.
+Nutzlastbelegung unter dem 80-%-Arbeitslimit der 8-MiB-Zone blieb. Ein
+Dauerlauf wurde nicht ausgeführt und bleibt wie vereinbart zurückgestellt.
 
 ## RFC-9111-/RFC-9110-Restmatrix (aktueller Quellstand r74)
 
